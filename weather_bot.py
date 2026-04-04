@@ -1,0 +1,368 @@
+#!/usr/bin/env python3
+"""
+Weather Trading Bot
+--------------------
+Paper-trading bot for Polymarket daily temperature threshold markets.
+Runs a continuous poll loop — entry is gated entirely by the decision layer.
+
+Each poll:
+  1. Exit pass  — check open positions for early-exit triggers
+  2. Entry pass — scan markets, evaluate candidates, place approved trades
+
+Usage:
+    python weather_bot.py
+    python weather_bot.py --dry-run  # scan + evaluate but never place orders
+"""
+import argparse
+import time
+from datetime import datetime, timezone
+
+import db
+from config import WEATHER, PAPER_STARTING_BALANCE
+from layers.layer3_weather import WeatherLayer
+from executor.paper import PaperExecutor
+from executor.weather_exit import check_weather_exit
+from weather_scanner import run_scan
+from weather_decision import evaluate, print_audit
+from weather_resolver import run_resolve_pass
+import weather_catalog
+import weather_calibration_scheduler as _calibration
+import trader_monitor as _trader_monitor
+
+POLL_INTERVAL          = WEATHER.get("bot_poll_interval_seconds",  60)
+CACHE_REFRESH          = WEATHER.get("bot_cache_refresh_polls",    10)
+DEFAULT_MAX_BET        = WEATHER.get("kelly_max_bet_usdc",         50.00)
+TRADER_MONITOR_EVERY_N = WEATHER.get("trader_monitor_poll_every_n", 10)
+
+_layer    = WeatherLayer()
+_executor = PaperExecutor()
+
+
+# -- Startup prompt -----------------------------------------------------------
+
+def _prompt_max_bet() -> float:
+    """Ask the user for a max-bet cap at startup. Enter to accept default."""
+    try:
+        raw = input(f"  Max bet per trade [${DEFAULT_MAX_BET:.0f} USDC]: ").strip()
+        if raw:
+            val = float(raw)
+            if val > 0:
+                return val
+    except (ValueError, EOFError):
+        pass
+    return DEFAULT_MAX_BET
+
+
+# -- Exit pass ----------------------------------------------------------------
+
+def run_exit_pass():
+    if not db.get_open_trades():
+        return
+
+    _executor.update_open_positions()
+
+    # Re-fetch after update so the exit loop sees the freshly-written prices,
+    # not the stale values from before update_open_positions() ran.
+    open_trades = db.get_open_trades()
+
+    for trade in open_trades:
+        # Reconstruct the minimal market dict from stored trade fields.
+        # The Gamma API has no reliable single-market lookup endpoint —
+        # ?conditionId= ignores the filter, /markets/<id> returns 422.
+        # _layer.scan() needs: question, id, end_date, price.
+        # entry_price is always the YES market price (stored at open time).
+        market_data = {
+            "question": trade["market_name"],
+            "id":       trade["market_id"],
+            "end_date": trade.get("end_date", ""),
+            "price":    trade.get("entry_price") or trade.get("fill_price", 0.5),
+            "token_id": trade.get("token_id"),
+        }
+
+        current_ens_pct, ens_yes, ens_n = _get_current_ensemble(trade, market_data)
+
+        # Persist latest ensemble counts so the dashboard can show current vs entry
+        if ens_yes is not None and ens_n is not None:
+            db.update_trade(trade["id"], {
+                "current_ensemble_yes": ens_yes,
+                "current_ensemble_n":   ens_n,
+            })
+
+        sig = check_weather_exit(trade, market_data, current_ens_pct)
+
+        _city      = (trade.get("city") or "?").title()
+        _dir       = (trade.get("direction") or "?").upper()
+        _thr       = trade.get("threshold") or "?"
+        _fill      = trade.get("fill_price") or trade.get("entry_price")
+        _now       = trade.get("current_price")
+        _shares    = trade.get("shares") or 0
+        _pnl       = (_now - _fill) * _shares if (_now is not None and _fill is not None) else None
+        _fill_str  = f"{_fill:.0%}" if _fill is not None else "?"
+        _now_str   = f"{_now:.0%}"  if _now  is not None else "?"
+        _pnl_str   = f"{_pnl:+.2f}" if _pnl is not None else "?"
+        _ent_yes   = trade.get("entry_ensemble_yes")
+        _ent_n     = trade.get("entry_ensemble_n")
+        _ent_ens   = f"{int(_ent_yes)}/{_ent_n}" if _ent_yes is not None and _ent_n else "?"
+        _cur_ens   = f"{ens_yes}/{ens_n}" if ens_yes is not None else "?"
+        _pos_line  = (
+            f"{_city:<12} {_dir:<3}  {_thr:<6}  "
+            f"entry={_fill_str}→now={_now_str}  pnl=${_pnl_str}  "
+            f"ens={_ent_ens}→{_cur_ens}"
+        )
+
+        if sig.should_exit:
+            print(
+                f"  [exit] {_pos_line}  -- {sig.reason}"
+                + (" [URGENT]" if sig.urgent else "")
+            )
+            _executor.close_full(trade, reason=sig.reason)
+        else:
+            print(f"  [hold] {_pos_line}  -- {sig.reason}")
+
+
+def _get_current_ensemble(trade: dict, market_data: dict) -> tuple[float | None, int | None, int | None]:
+    """Returns (pct, yes_count, n_count) from the latest ensemble, or (None, None, None)."""
+    try:
+        scan_data = _layer.scan(market_data)
+        if scan_data and scan_data.get("ensemble_n", 0) >= 10:
+            yes = scan_data.get("yes_ensemble")
+            n   = scan_data.get("ensemble_n")
+            pct = yes / n if yes is not None and n else None
+            return pct, yes, n
+    except Exception:
+        pass
+    return None, None, None
+
+
+# -- Entry pass ---------------------------------------------------------------
+
+def run_entry_pass(already_traded: set, max_bet: float, dry_run: bool = False) -> tuple[int, set]:
+    balance    = db.get_balance()
+    open_market_ids = db.get_open_market_ids()
+    all_candidates = run_scan(include_today=False, exclude_market_ids=open_market_ids)
+    db.save_scan_cache(all_candidates)   # dashboard reads from here — no separate scan needed
+
+    weather_condition_ids = {c["_market"]["id"] for c in all_candidates if c.get("_market")}
+
+    # Strip markets already entered this session
+    candidates = [c for c in all_candidates if c["_market"]["id"] not in already_traded]
+
+    if not candidates:
+        print("  [entry] No scanner candidates after session filter.")
+        return 0, weather_condition_ids
+
+    results  = evaluate(candidates, balance, max_bet_override=max_bet)
+    approved = [r for r in results if r.verdict == "APPROVED"]
+    rejected = [r for r in results if r.verdict == "REJECTED"]
+
+    # Always log rejections so you can see why opportunities were skipped
+    for r in rejected:
+        c      = r.candidate
+        _tier  = "STRONG" if c["edge_pct"] >= 0.30 else "EDGE" if c["edge_pct"] >= 0.15 else "WEAK"
+        _ens   = f"{c['ens_yes']}/{c['ens_n']}" if c.get("ens_yes") is not None else "?"
+        _vol   = f"${c['volume']:,.0f}" if c.get("volume") is not None else "?"
+        _hrs   = f"{c['hours_to_close']:.0f}h" if c.get("hours_to_close") is not None else "?"
+        _thr   = c.get("threshold_str") or "?"
+        _tc    = r.checks.get("trader_consensus", {})
+        _tr    = f"  tr={_tc['signal']}({_tc['same']}v{_tc['opp']})" if _tc else ""
+        print(
+            f"  [skip] {c['city_display']:<16} {r.direction.upper():<4} {_thr:<6}  "
+            f"mkt={c['market_price']:.0%}  mdl={c['model_prob']:.0%}  edge={c['edge_pct']:.0%}  "
+            f"{_tier:<6}  ens={_ens}  vol={_vol}  closes={_hrs}{_tr}  -- {r.reason}"
+        )
+
+    if not approved:
+        print("  [entry] No approved trades this poll.")
+        return 0, weather_condition_ids
+
+    entered = 0
+    for result in approved:
+        c      = result.candidate
+        market = dict(c["_market"])   # copy — add city for the trade record
+        market["city"] = c["city"]
+
+        consensus = result.checks.get("trader_consensus", {})
+        consensus_str = f"  traders={consensus['signal']}({consensus['same']}vs{consensus['opp']})" if consensus else ""
+        print(
+            f"\n  [entry] {c['city_display']} {result.direction.upper()}  "
+            f"edge={c['edge_pct']:.0%}  score={result.score:.3f}  "
+            f"size=${result.size_usdc:.2f}  days_out={c['days_to_resolution']}"
+            f"{consensus_str}"
+        )
+
+        if dry_run:
+            print("  [entry] DRY RUN — order not placed.")
+            entered += 1
+            continue
+
+        estimate = {
+            "probability":        c["model_prob"],
+            "edge_score":         c["edge_pct"] * 100,
+            "sources":            ["weather_forecast"],
+            "entry_ensemble_pct": c["ens_pct"],
+            "entry_ensemble_yes": c.get("ens_yes"),
+            "entry_ensemble_n":   c.get("ens_n"),
+            "threshold":          c["_scan_data"].get("target_str"),
+        }
+
+        _executor.place_order(
+            market    = market,
+            direction = result.direction.upper(),
+            size_usdc = result.size_usdc,
+            estimate  = estimate,
+        )
+
+        already_traded.add(market["id"])
+        entered += 1
+
+    return entered, weather_condition_ids
+
+
+# -- Main loop ----------------------------------------------------------------
+
+def _prompt_startup() -> bool:
+    """
+    Ask whether to resume existing session or reset.
+    Returns True if the user chose to reset.
+    """
+    summary = db.get_session_summary()
+    open_n   = summary["open_count"]
+    closed_n = summary["closed_count"]
+    balance  = summary["balance"]
+
+    print("\n  ┌─ Previous session ─────────────────────────────────┐")
+    print(f"  │  Balance : ${balance:>10,.2f}                          │")
+    print(f"  │  Open    : {open_n:>4} position(s)                       │")
+    print(f"  │  Closed  : {closed_n:>4} trade(s)                         │")
+    print("  └────────────────────────────────────────────────────┘")
+    print()
+    print("  [R] Resume — keep open positions and continue")
+    print("  [C] Clear  — wipe all trades, reset balance to "
+          f"${PAPER_STARTING_BALANCE:,.0f}")
+    print()
+
+    while True:
+        try:
+            choice = input("  Choice [R/C]: ").strip().upper()
+        except EOFError:
+            choice = "R"
+
+        if choice in ("R", ""):
+            print("  Resuming previous session.\n")
+            return False
+
+        if choice == "C":
+            print(f"\n  WARNING: This will permanently delete {open_n} open position(s) "
+                  f"and {closed_n} closed trade(s).")
+            try:
+                confirm1 = input("  Type YES to confirm: ").strip().upper()
+            except EOFError:
+                confirm1 = ""
+            if confirm1 != "YES":
+                print("  Reset cancelled — resuming instead.\n")
+                return False
+
+            try:
+                confirm2 = input("  Type YES again to proceed: ").strip().upper()
+            except EOFError:
+                confirm2 = ""
+            if confirm2 != "YES":
+                print("  Reset cancelled — resuming instead.\n")
+                return False
+
+            db.reset_paper_trading()
+            print("  All trades cleared. Balance reset to "
+                  f"${PAPER_STARTING_BALANCE:,.0f}.\n")
+            return True
+
+        print("  Please enter R to resume or C to clear.")
+
+
+def run(dry_run: bool = False):
+    db.init_db()
+    _prompt_startup()
+
+    print("[bot] Weather Trading Bot — paper mode")
+    print(f"      Poll interval : {POLL_INTERVAL}s")
+    if dry_run:
+        print("      Mode          : DRY RUN (no orders will be placed)")
+
+    max_bet = _prompt_max_bet()
+    print(f"      Max bet       : ${max_bet:.2f} USDC per trade\n")
+
+    # Calibration catch-up — fills any resolution/temperature gaps from downtime
+    try:
+        _calibration.startup()
+    except Exception as e:
+        print(f"[bot] Calibration startup pass failed (non-fatal): {e}\n")
+
+    # Catalog snapshot on startup
+    print("[bot] Running catalog snapshot...")
+    try:
+        weather_catalog.run_snapshot()
+    except Exception as e:
+        print(f"[bot] Catalog snapshot failed (non-fatal): {e}")
+
+    # Initial layer refresh (loads top-N market IDs + clears forecast cache)
+    print("[bot] Refreshing weather layer...")
+    _layer.refresh()
+
+    balance = db.get_balance()
+    print(f"[bot] Balance: ${balance:,.2f}\n")
+
+    poll         = 0
+    already_traded: set = set()
+
+    while True:
+        poll += 1
+        now_str = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+        print(f"\n{'─' * 60}")
+        _open_n = len(db.get_open_trades())
+        print(f"[bot] Poll #{poll}  {now_str}  balance=${db.get_balance():,.2f}  open={_open_n}")
+
+        # Periodic layer refresh (clears stale ensemble cache)
+        if poll % CACHE_REFRESH == 0:
+            print("[bot] Refreshing layer caches...")
+            _layer.refresh()
+
+        # Calibration pass — passive data gathering, rate-limited internally
+        try:
+            _calibration.on_poll(poll)
+        except Exception as e:
+            print(f"[calibration] on_poll error (non-fatal): {e}")
+
+        # Resolve pass — settle expired markets before checking exits/entries
+        settled = run_resolve_pass(_executor)
+        if settled:
+            print(f"\n[bot] Settled {settled} resolved position(s).")
+
+        # Exit pass
+        run_exit_pass()
+
+        # Entry pass — also returns the full weather condition_id set from the scan
+        entered, weather_condition_ids = run_entry_pass(already_traded, max_bet, dry_run=dry_run)
+        if entered:
+            print(f"\n[bot] Entered {entered} new position(s) this poll.")
+
+        # Trader monitor — poll tracked wallets for live positions every 10 polls
+        if poll % TRADER_MONITOR_EVERY_N == 0:
+            try:
+                _trader_monitor.update(weather_condition_ids)
+            except Exception as e:
+                print(f"[trader_monitor] update error (non-fatal): {e}")
+
+        time.sleep(POLL_INTERVAL)
+
+
+# -- Entry point --------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(description="Weather trading bot (paper mode)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Evaluate trades but do not place any orders")
+    args = parser.parse_args()
+    run(dry_run=args.dry_run)
+
+
+if __name__ == "__main__":
+    main()
