@@ -91,6 +91,12 @@ WEATHER = {
     # 180 min = 3 hours, aligned to ICON ensemble update cadence.
     # estimate() will force-fetch if the cached data is older than this.
     "decision_cache_ttl_minutes": 180,
+
+    # ── Trader shadow forecast DB (Stage 2) ───────────────────────────────────
+    "trader_forecast_freeze_max_per_cycle": 50,         # cap untraded-market CLOB checks per resolution pass
+    "calibration_temp_pass_max_cities": 20,             # cap cities fetched per temperature pass (archive API burst control)
+    "calibration_temp_pass_cooldown_after_429_minutes": 10,  # skip temp pass if any Open-Meteo 429 seen within N min
+    "calibration_temp_pass_skip_if_ensemble_within_seconds": 60,  # skip temp pass if ensemble burst fired recently
 }
 
 # ── API Endpoints ─────────────────────────────────────────────────────────────

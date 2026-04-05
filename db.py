@@ -108,6 +108,36 @@ def init_db():
                 ON trader_positions (market_id, outcome);
         """)
 
+        # Trader shadow forecasts — frozen snapshots of tracked-trader positions
+        # at market resolution. Enables per-trader accuracy scoring by city/season.
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS trader_forecasts (
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                wallet             TEXT    NOT NULL,
+                market_id          TEXT    NOT NULL,
+                city               TEXT    NOT NULL,
+                end_date           TEXT    NOT NULL,
+                threshold          TEXT,
+                direction          TEXT    NOT NULL,
+                entry_price        REAL    NOT NULL,
+                net_size           REAL    NOT NULL,
+                gross_size         REAL    NOT NULL,
+                frozen_at          TEXT    NOT NULL,
+                actual_resolution  TEXT,
+                resolution_price   REAL,
+                was_correct        INTEGER,
+                actual_temperature REAL,
+                temperature_delta  REAL,
+                UNIQUE(wallet, market_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_trader_forecasts_wallet
+                ON trader_forecasts (wallet);
+            CREATE INDEX IF NOT EXISTS idx_trader_forecasts_city
+                ON trader_forecasts (city, end_date);
+            CREATE INDEX IF NOT EXISTS idx_trader_forecasts_market
+                ON trader_forecasts (market_id);
+        """)
+
         # Trader discovery — wallets identified as high-activity weather traders
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS tracked_traders (
