@@ -554,6 +554,78 @@ def upsert_trader_positions(wallet: str, positions: list[dict]):
             """, (wallet, p["market_id"], p["outcome"].upper(), p["size"], p["avg_price"], now))
 
 
+def freeze_trader_forecasts(
+    market_id: str,
+    close_price: float,
+    city: str,
+    end_date: str,
+    threshold: str | None,
+) -> int:
+    """
+    Freeze all tracked-trader positions for a resolved market into trader_forecasts.
+    Idempotent via UNIQUE(wallet, market_id) — safe to re-call.
+
+    Args:
+        market_id:  condition_id of the resolved market
+        close_price: CLOB midpoint at settlement (~0.001 or ~0.999)
+        city:       city this market was for (denormalized)
+        end_date:   YYYY-MM-DD resolution date (denormalized)
+        threshold:  threshold string e.g. ">=75" (denormalized, nullable)
+
+    Returns: number of new rows inserted.
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
+    actual_resolution = "YES" if close_price > 0.5 else "NO"
+    inserted = 0
+
+    with get_conn() as conn:
+        # Group current positions by wallet for this market
+        rows = conn.execute("""
+            SELECT wallet, outcome, size, avg_price
+              FROM trader_positions
+             WHERE market_id = ?
+        """, (market_id,)).fetchall()
+
+        by_wallet: dict[str, dict] = {}
+        for r in rows:
+            w = r["wallet"]
+            slot = by_wallet.setdefault(w, {"YES": None, "NO": None})
+            slot[r["outcome"].upper()] = {"size": r["size"], "avg_price": r["avg_price"]}
+
+        for wallet, sides in by_wallet.items():
+            yes_size  = sides["YES"]["size"]      if sides["YES"] else 0.0
+            no_size   = sides["NO"]["size"]       if sides["NO"]  else 0.0
+            yes_price = sides["YES"]["avg_price"] if sides["YES"] else 0.0
+            no_price  = sides["NO"]["avg_price"]  if sides["NO"]  else 0.0
+
+            net_size   = abs(yes_size - no_size)
+            gross_size = yes_size + no_size
+            if net_size < 0.01:
+                continue  # fully hedged or dust — skip
+
+            if yes_size >= no_size:
+                direction   = "YES"
+                entry_price = yes_price
+            else:
+                direction   = "NO"
+                entry_price = no_price
+
+            was_correct = 1 if direction == actual_resolution else 0
+
+            cur = conn.execute("""
+                INSERT OR IGNORE INTO trader_forecasts
+                    (wallet, market_id, city, end_date, threshold,
+                     direction, entry_price, net_size, gross_size, frozen_at,
+                     actual_resolution, resolution_price, was_correct)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (wallet, market_id, city.lower(), end_date, threshold,
+                  direction, entry_price, net_size, gross_size, now_iso,
+                  actual_resolution, round(close_price, 4), was_correct))
+            inserted += cur.rowcount
+
+    return inserted
+
+
 def get_trader_consensus(market_id: str, direction: str, min_resolved: int = 15, min_win_rate: float = 0.55) -> dict:
     """
     For a given market and direction (YES/NO), count how many qualified tracked
