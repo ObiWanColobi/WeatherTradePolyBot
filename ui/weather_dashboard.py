@@ -495,6 +495,55 @@ if closed_trades:
 else:
     st.info("No closed trades yet — P&L breakdown will appear here after first resolution.")
 
+# ── Trader Accuracy (Stage 2) ────────────────────────────────────────────────
+st.subheader("Trader Accuracy")
+
+ta_col1, ta_col2 = st.columns([1, 1])
+with ta_col1:
+    min_resolved_filter = st.slider(
+        "Min resolved forecasts", min_value=1, max_value=50, value=10, key="ta_min_resolved"
+    )
+with ta_col2:
+    exclude_coinflip = st.checkbox(
+        "Exclude coin-flip zone (|delta| < 2 deg C)",
+        value=False,
+        key="ta_exclude_coinflip",
+    )
+
+delta_threshold = 2.0 if exclude_coinflip else None
+
+ta_rows = db.get_trader_accuracy_summary(
+    min_resolved=min_resolved_filter,
+    require_temp_delta_ge=delta_threshold,
+)
+
+if not ta_rows:
+    st.info("No resolved trader forecasts yet. Table will populate as markets resolve.")
+else:
+    import pandas as _pd
+    df = _pd.DataFrame(ta_rows)
+    df["accuracy_%"] = (df["accuracy"] * 100).round(1)
+    df["brier"]      = df["brier"].round(4) if "brier" in df else None
+    df["wallet_short"] = df["wallet"].str[:6] + "..." + df["wallet"].str[-4:]
+    display = df[[
+        "wallet_short", "pseudonym", "n_forecasts", "n_resolved", "accuracy_%",
+        "brier", "best_city", "worst_city", "best_season",
+        "edge_tier_breakdown", "last_forecast",
+    ]].rename(columns={
+        "wallet_short":        "Wallet",
+        "pseudonym":           "Pseudonym",
+        "n_forecasts":         "N",
+        "n_resolved":          "Resolved",
+        "accuracy_%":          "Accuracy %",
+        "brier":               "Brier",
+        "best_city":           "Best City",
+        "worst_city":          "Worst City",
+        "best_season":         "Best Season",
+        "edge_tier_breakdown": "Edge Tier (W/E/S)",
+        "last_forecast":       "Last Forecast",
+    })
+    st.dataframe(display, use_container_width=True, hide_index=True)
+
 # ── Auto-refresh ──────────────────────────────────────────────────────────────
 
 time.sleep(REFRESH_INTERVAL)
