@@ -10,6 +10,18 @@ _session.headers.update({"User-Agent": "weather-bot/1.0"})
 _INTER_REQUEST_DELAY = 0.25      # seconds between ensemble API calls to avoid 429s
 _RETRY_DELAYS        = [3, 8, 15] # backoff on 429 or connection error (3 attempts)
 
+# Module-level telemetry for calibration scheduler gating
+_last_429_ts: float = 0.0         # unix timestamp of most recent 429 from any endpoint
+_last_ensemble_ts: float = 0.0    # unix timestamp of most recent ensemble API call
+
+
+def get_last_429_ts() -> float:
+    return _last_429_ts
+
+
+def get_last_ensemble_ts() -> float:
+    return _last_ensemble_ts
+
 
 def get_daily_forecast(lat: float, lon: float, tz: str = "auto", days: int = 4) -> list[dict]:
     """
@@ -81,8 +93,12 @@ def get_ensemble_forecasts(lat: float, lon: float, tz: str = "auto", days: int =
             if attempt > 0:
                 time.sleep(_RETRY_DELAYS[attempt - 1])
             try:
+                global _last_ensemble_ts
+                _last_ensemble_ts = time.time()
                 resp = _session.get(ENSEMBLE_API, params=params, timeout=15)
                 if resp.status_code == 429:
+                    global _last_429_ts
+                    _last_429_ts = time.time()
                     print(f"[open_meteo] ensemble rate-limited model={model} ({lat},{lon}): skipping (will use stale/sigmoid)")
                     break   # no retries on 429 — back off and let TTL serve stale cache
                 resp.raise_for_status()

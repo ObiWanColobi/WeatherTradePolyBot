@@ -184,6 +184,27 @@ def on_poll(poll_number: int):
         if temp_pending > 0:
             should_run_temp = True
 
+    # ── Burst protection gates (Stage 2) ─────────────────────────────────────
+    if should_run_temp:
+        import time as _time
+        from config import WEATHER
+        try:
+            from markets.open_meteo import get_last_429_ts, get_last_ensemble_ts
+            now_ts            = _time.time()
+            cooldown_minutes  = WEATHER.get("calibration_temp_pass_cooldown_after_429_minutes", 10)
+            ensemble_skip_sec = WEATHER.get("calibration_temp_pass_skip_if_ensemble_within_seconds", 60)
+
+            if now_ts - get_last_429_ts() < cooldown_minutes * 60:
+                print(f"[calibration] Temp pass skipped — 429 cooldown active "
+                      f"({cooldown_minutes}m)")
+                should_run_temp = False
+            elif now_ts - get_last_ensemble_ts() < ensemble_skip_sec:
+                print(f"[calibration] Temp pass skipped — ensemble burst within "
+                      f"{ensemble_skip_sec}s")
+                should_run_temp = False
+        except ImportError:
+            pass  # open_meteo helpers not available — proceed without gating
+
     if should_run_temp:
         temp_pending = _temperature_candidates_exist()
         if temp_pending > 0:
