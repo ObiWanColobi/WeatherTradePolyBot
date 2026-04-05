@@ -865,6 +865,131 @@ def get_trader_forecast_cities_needing_temp() -> dict[str, set[str]]:
     return result
 
 
+def get_trader_accuracy_summary(
+    min_resolved: int = 10,
+    require_temp_delta_ge: float | None = None,
+) -> list[dict]:
+    """
+    Per-wallet accuracy summary for the dashboard.
+
+    Returns list of dicts: {
+        wallet, pseudonym, n_forecasts, n_resolved, accuracy, brier,
+        best_city, worst_city, best_season, edge_tier_breakdown, last_forecast
+    }
+
+    Filters:
+        min_resolved: only include wallets with >= this many resolved forecasts
+        require_temp_delta_ge: if set, only score forecasts where |temperature_delta| >= this value
+    """
+    delta_clause = ""
+    params: list = []
+    if require_temp_delta_ge is not None:
+        delta_clause = " AND abs(temperature_delta) >= ? "
+        params.append(require_temp_delta_ge)
+
+    with get_conn() as conn:
+        wallets = conn.execute(f"""
+            SELECT tf.wallet,
+                   COUNT(*) AS n_forecasts,
+                   SUM(CASE WHEN was_correct IS NOT NULL THEN 1 ELSE 0 END) AS n_resolved,
+                   SUM(CASE WHEN was_correct = 1 THEN 1 ELSE 0 END) AS n_correct,
+                   AVG(CASE WHEN was_correct IS NOT NULL
+                            THEN (entry_price - was_correct) * (entry_price - was_correct)
+                       END) AS brier,
+                   MAX(frozen_at) AS last_forecast
+              FROM trader_forecasts tf
+             WHERE 1=1 {delta_clause}
+          GROUP BY tf.wallet
+            HAVING n_resolved >= ?
+          ORDER BY (CAST(n_correct AS REAL) / NULLIF(n_resolved, 0)) DESC
+        """, (*params, min_resolved)).fetchall()
+
+        results = []
+        for w in wallets:
+            wallet   = w["wallet"]
+            accuracy = (w["n_correct"] / w["n_resolved"]) if w["n_resolved"] else None
+
+            # Pseudonym
+            pseudo_row = conn.execute(
+                "SELECT pseudonym FROM tracked_traders WHERE wallet = ?", (wallet,)
+            ).fetchone()
+            pseudonym = pseudo_row["pseudonym"] if pseudo_row else None
+
+            # Best / worst city (min 5 resolved per city)
+            city_rows = conn.execute(f"""
+                SELECT city,
+                       SUM(CASE WHEN was_correct = 1 THEN 1 ELSE 0 END) * 1.0 /
+                         NULLIF(SUM(CASE WHEN was_correct IS NOT NULL THEN 1 ELSE 0 END), 0) AS acc
+                  FROM trader_forecasts
+                 WHERE wallet = ? AND was_correct IS NOT NULL {delta_clause}
+              GROUP BY city
+                HAVING SUM(CASE WHEN was_correct IS NOT NULL THEN 1 ELSE 0 END) >= 5
+            """, (wallet, *params)).fetchall()
+            best_city  = max(city_rows, key=lambda r: r["acc"])["city"] if city_rows else None
+            worst_city = min(city_rows, key=lambda r: r["acc"])["city"] if city_rows else None
+
+            # Season breakdown (by month of end_date)
+            season_rows = conn.execute(f"""
+                SELECT substr(end_date, 6, 2) AS mm,
+                       SUM(CASE WHEN was_correct = 1 THEN 1 ELSE 0 END) * 1.0 /
+                         NULLIF(SUM(CASE WHEN was_correct IS NOT NULL THEN 1 ELSE 0 END), 0) AS acc,
+                       SUM(CASE WHEN was_correct IS NOT NULL THEN 1 ELSE 0 END) AS n
+                  FROM trader_forecasts
+                 WHERE wallet = ? AND was_correct IS NOT NULL {delta_clause}
+              GROUP BY mm
+            """, (wallet, *params)).fetchall()
+            season_map = {"Winter": [], "Spring": [], "Summer": [], "Fall": []}
+            for r in season_rows:
+                mm = int(r["mm"]) if r["mm"] else 0
+                if mm in (12, 1, 2):    season_map["Winter"].append((r["acc"], r["n"]))
+                elif mm in (3, 4, 5):   season_map["Spring"].append((r["acc"], r["n"]))
+                elif mm in (6, 7, 8):   season_map["Summer"].append((r["acc"], r["n"]))
+                elif mm in (9, 10, 11): season_map["Fall"].append((r["acc"], r["n"]))
+            season_best, best_acc = None, -1.0
+            for s, entries in season_map.items():
+                if not entries:
+                    continue
+                total_n  = sum(e[1] for e in entries)
+                weighted = sum(e[0] * e[1] for e in entries) / total_n if total_n else 0
+                if weighted > best_acc:
+                    best_acc, season_best = weighted, s
+
+            # Edge-tier breakdown (by |entry_price - 0.5|)
+            tier_rows = conn.execute(f"""
+                SELECT CASE
+                         WHEN abs(entry_price - 0.5) >= 0.30 THEN 'S'
+                         WHEN abs(entry_price - 0.5) >= 0.15 THEN 'E'
+                         ELSE 'W'
+                       END AS tier,
+                       SUM(CASE WHEN was_correct = 1 THEN 1 ELSE 0 END) * 1.0 /
+                         NULLIF(SUM(CASE WHEN was_correct IS NOT NULL THEN 1 ELSE 0 END), 0) AS acc
+                  FROM trader_forecasts
+                 WHERE wallet = ? AND was_correct IS NOT NULL {delta_clause}
+              GROUP BY tier
+            """, (wallet, *params)).fetchall()
+            tier_map = {r["tier"]: r["acc"] for r in tier_rows}
+            tier_str = " ".join(
+                f"{t}:{int(round((tier_map.get(t) or 0) * 100))}%"
+                for t in ("W", "E", "S")
+                if t in tier_map
+            ) or "—"
+
+            results.append({
+                "wallet":              wallet,
+                "pseudonym":           pseudonym,
+                "n_forecasts":         w["n_forecasts"],
+                "n_resolved":          w["n_resolved"],
+                "accuracy":            accuracy,
+                "brier":               w["brier"],
+                "best_city":           best_city,
+                "worst_city":          worst_city,
+                "best_season":         season_best,
+                "edge_tier_breakdown": tier_str,
+                "last_forecast":       w["last_forecast"],
+            })
+        return results
+
+
 def get_untraded_market_candidates(limit: int = 50) -> list[dict]:
     """
     Return distinct market_ids present in trader_positions but NOT yet in
