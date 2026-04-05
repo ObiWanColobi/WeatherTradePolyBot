@@ -786,3 +786,50 @@ def get_city_win_rate(city: str, days: int = 30) -> dict | None:
             "correct":  row["correct"],
             "accuracy": row["correct"] / row["resolved"],
         }
+
+
+def get_untraded_market_candidates(limit: int = 50) -> list[dict]:
+    """
+    Return distinct market_ids present in trader_positions but NOT yet in
+    trader_forecasts AND NOT in our own trades table. These are markets
+    tracked traders held that our bot didn't trade — candidates for
+    second-pass freeze.
+
+    Ordered by oldest snapshot_at first (stabilizes cycling order).
+    """
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT tp.market_id, MIN(tp.snapshot_at) AS oldest_snapshot
+              FROM trader_positions tp
+             WHERE tp.market_id NOT IN (SELECT market_id FROM trader_forecasts)
+               AND tp.market_id NOT IN (SELECT market_id FROM trades WHERE market_id IS NOT NULL)
+          GROUP BY tp.market_id
+          ORDER BY oldest_snapshot ASC
+             LIMIT ?
+        """, (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_market_metadata_from_scanner_cache(market_id: str) -> dict | None:
+    """
+    Look up city / end_date / threshold for a market_id from the latest
+    scanner_cache JSON blob. Returns None if not found.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT results_json FROM scanner_cache LIMIT 1"
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        candidates = json.loads(row["results_json"])
+    except Exception:
+        return None
+    for c in candidates:
+        if c.get("condition_id") == market_id or c.get("market_id") == market_id:
+            city = (c.get("city") or "").lower()
+            end_date = (c.get("end_date") or "")[:10]
+            threshold = c.get("threshold")
+            if city and end_date:
+                return {"city": city, "end_date": end_date, "threshold": threshold}
+    return None

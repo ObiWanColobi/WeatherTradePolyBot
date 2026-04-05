@@ -326,3 +326,29 @@ def get_market_by_id(market_id: str) -> dict | None:
         }
     except Exception:
         return None
+
+
+def get_market_tokens(condition_id: str) -> dict | None:
+    """
+    Fetch YES/NO token IDs for a market via CLOB.
+    Returns {"yes_token_id": "...", "no_token_id": "..."} or None on failure.
+    """
+    try:
+        resp = requests.get(
+            f"{POLYMARKET_CLOB_API}/markets/{condition_id}",
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        tokens = data.get("tokens", [])
+        result = {}
+        for t in tokens:
+            outcome = (t.get("outcome") or "").upper()
+            if outcome == "YES":
+                result["yes_token_id"] = t.get("token_id")
+            elif outcome == "NO":
+                result["no_token_id"] = t.get("token_id")
+        return result if result.get("yes_token_id") else None
+    except Exception:
+        return None

@@ -102,6 +102,84 @@ def _clob_midpoint(token_id: str) -> float | None:
         return None
 
 
+def _run_untraded_freeze_pass(quiet: bool = False) -> dict:
+    """
+    Second freeze pass: markets held by tracked traders that our bot didn't
+    trade. For each, check CLOB midpoint; if resolved, freeze trader forecasts.
+
+    Throttled by trader_forecast_freeze_max_per_cycle and 0.1s inter-call sleep.
+    """
+    from config import WEATHER
+    max_per_cycle = WEATHER.get("trader_forecast_freeze_max_per_cycle", 50)
+
+    candidates = db.get_untraded_market_candidates(limit=max_per_cycle)
+    counts = {"checked": 0, "frozen": 0, "unresolved": 0, "no_metadata": 0, "errors": 0}
+
+    if not candidates:
+        return counts
+
+    if not quiet:
+        print(f"  [untraded-freeze] Checking {len(candidates)} untraded market(s)...")
+
+    for cand in candidates:
+        market_id = cand["market_id"]
+        counts["checked"] += 1
+
+        try:
+            from markets.polymarket import get_market_tokens
+            tokens = get_market_tokens(market_id)
+        except Exception:
+            tokens = None
+
+        if not tokens or not tokens.get("yes_token_id"):
+            counts["no_metadata"] += 1
+            time.sleep(0.1)
+            continue
+
+        yes_price = _clob_midpoint(tokens["yes_token_id"])
+        if yes_price is None:
+            counts["no_metadata"] += 1
+            time.sleep(0.1)
+            continue
+
+        # Only freeze if resolved (midpoint at extreme)
+        if _CLOB_NO < yes_price < _CLOB_YES:
+            counts["unresolved"] += 1
+            time.sleep(0.1)
+            continue
+
+        # Resolved — need market metadata for city/end_date/threshold
+        meta = db.get_market_metadata_from_scanner_cache(market_id)
+        if not meta:
+            counts["no_metadata"] += 1
+            time.sleep(0.1)
+            continue
+
+        try:
+            frozen = db.freeze_trader_forecasts(
+                market_id=market_id,
+                close_price=yes_price,
+                city=meta["city"],
+                end_date=meta["end_date"],
+                threshold=meta.get("threshold"),
+            )
+            counts["frozen"] += frozen
+            if frozen > 0 and not quiet:
+                print(f"    froze {frozen} for untraded {meta['city']} {meta['end_date']}")
+        except Exception as e:
+            counts["errors"] += 1
+            if not quiet:
+                print(f"    [warn] freeze failed for {market_id}: {e}")
+
+        time.sleep(0.1)
+
+    if not quiet:
+        print(f"  [untraded-freeze] frozen={counts['frozen']}  "
+              f"unresolved={counts['unresolved']}  no_meta={counts['no_metadata']}  "
+              f"err={counts['errors']}")
+    return counts
+
+
 def _run_resolution_pass(quiet: bool = False) -> dict:
     all_trades = db.get_all_trades()
     candidates = [
@@ -188,6 +266,13 @@ def _run_resolution_pass(quiet: bool = False) -> dict:
                   f"fill={fill:.3f}  resolved_price={yes_price:.4f}")
 
         time.sleep(0.15)
+
+    # Second pass: untraded markets held by tracked traders
+    try:
+        _run_untraded_freeze_pass(quiet=quiet)
+    except Exception as e:
+        if not quiet:
+            print(f"  [untraded-freeze] pass failed: {e}")
 
     if not quiet:
         print(f"  [resolution] resolved={counts['resolved']}  "
