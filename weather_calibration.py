@@ -161,6 +161,25 @@ def _run_resolution_pass(quiet: bool = False) -> dict:
         })
         counts["resolved"] += 1
 
+        # Freeze trader forecasts for this resolved market
+        try:
+            city      = (trade.get("city") or "").lower()
+            end_date  = (trade.get("end_date") or "")[:10]
+            threshold = trade.get("threshold")
+            if city and end_date:
+                frozen = db.freeze_trader_forecasts(
+                    market_id=trade["market_id"],
+                    close_price=yes_price,
+                    city=city,
+                    end_date=end_date,
+                    threshold=threshold,
+                )
+                if frozen > 0 and not quiet:
+                    print(f"    froze {frozen} trader forecast(s) for {city} {end_date}")
+        except Exception as e:
+            if not quiet:
+                print(f"    [warn] freeze_trader_forecasts failed for {trade.get('market_id')}: {e}")
+
         if not quiet:
             city  = (trade.get("city") or "?")[:12]
             label = "✓ correct" if correct else "✗ wrong"
