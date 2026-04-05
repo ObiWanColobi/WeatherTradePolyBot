@@ -363,6 +363,23 @@ def _run_temperature_pass(quiet: bool = False) -> dict:
         else:
             counts["no_coords"] += 1
 
+    # Union with trader_forecasts candidates
+    tf_city_dates = db.get_trader_forecast_cities_needing_temp()
+    for tf_city, tf_dates in tf_city_dates.items():
+        if tf_city in CITY_COORDS:
+            city_dates[tf_city].update(tf_dates)
+        else:
+            counts["no_coords"] += 1
+
+    # Apply per-pass city cap to bound archive API burst
+    from config import WEATHER
+    max_cities = WEATHER.get("calibration_temp_pass_max_cities", 20)
+    if len(city_dates) > max_cities:
+        limited = dict(sorted(city_dates.items())[:max_cities])
+        if not quiet:
+            print(f"    [cap] {len(city_dates)} cities needed; processing {max_cities} this pass")
+        city_dates = limited
+
     if not quiet:
         unique_cities = len(city_dates)
         total_dates   = sum(len(v) for v in city_dates.values())
@@ -418,6 +435,19 @@ def _run_temperature_pass(quiet: bool = False) -> dict:
             print(f"    saved {city_label:<12}  {date}  "
                   f"actual={temp:.1f}°C  threshold={trade['threshold']}  "
                   f"delta={delta:+.1f}°C  ({'YES' if condition_met else 'NO'})")
+
+    # Backfill trader_forecasts temperature for all processed cities
+    for city, dates in city_dates.items():
+        city_date_temps = {d: archive[(city, d)] for d in dates if (city, d) in archive}
+        if city_date_temps:
+            n = db.backfill_trader_forecast_temperatures(
+                city=city,
+                date_to_temp=city_date_temps,
+                threshold_parser=_parse_threshold,
+                delta_calc=_temperature_delta,
+            )
+            if n > 0 and not quiet:
+                print(f"    backfilled {n} trader_forecasts row(s) for {city}")
 
     if not quiet:
         print(f"  [temperature] filled={counts['filled']}  "

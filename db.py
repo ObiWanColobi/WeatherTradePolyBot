@@ -788,6 +788,83 @@ def get_city_win_rate(city: str, days: int = 30) -> dict | None:
         }
 
 
+def backfill_trader_forecast_temperatures(
+    city: str,
+    date_to_temp: dict[str, float],
+    threshold_parser,
+    delta_calc,
+) -> int:
+    """
+    Update trader_forecasts rows for (city, each date) with actual_temperature
+    and derived temperature_delta.
+
+    Args:
+        city:             lowercase city key
+        date_to_temp:     {'YYYY-MM-DD': temp_celsius}
+        threshold_parser: callable(threshold_str) -> (op, threshold_c) | None
+        delta_calc:       callable(temp_c, op, threshold_c) -> delta_c
+
+    Returns: count of rows updated.
+    """
+    updated = 0
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT id, end_date, threshold
+              FROM trader_forecasts
+             WHERE lower(city) = ?
+               AND actual_temperature IS NULL
+        """, (city.lower(),)).fetchall()
+
+        for r in rows:
+            d = (r["end_date"] or "")[:10]
+            temp = date_to_temp.get(d)
+            if temp is None:
+                continue
+            if not r["threshold"]:
+                conn.execute(
+                    "UPDATE trader_forecasts SET actual_temperature = ? WHERE id = ?",
+                    (round(temp, 2), r["id"]),
+                )
+                updated += 1
+                continue
+            parsed = threshold_parser(r["threshold"])
+            if parsed is None:
+                conn.execute(
+                    "UPDATE trader_forecasts SET actual_temperature = ? WHERE id = ?",
+                    (round(temp, 2), r["id"]),
+                )
+                updated += 1
+                continue
+            op, threshold_c = parsed
+            delta = delta_calc(temp, op, threshold_c)
+            conn.execute(
+                "UPDATE trader_forecasts SET actual_temperature = ?, temperature_delta = ? WHERE id = ?",
+                (round(temp, 2), round(delta, 2), r["id"]),
+            )
+            updated += 1
+    return updated
+
+
+def get_trader_forecast_cities_needing_temp() -> dict[str, set[str]]:
+    """
+    Return {city: {dates}} for trader_forecasts rows missing actual_temperature
+    where end_date is in the past.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    now_date = _dt.now(_tz.utc).strftime("%Y-%m-%d")
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT lower(city) AS city, substr(end_date, 1, 10) AS d
+              FROM trader_forecasts
+             WHERE actual_temperature IS NULL
+               AND substr(end_date, 1, 10) < ?
+        """, (now_date,)).fetchall()
+    result: dict[str, set[str]] = {}
+    for r in rows:
+        result.setdefault(r["city"], set()).add(r["d"])
+    return result
+
+
 def get_untraded_market_candidates(limit: int = 50) -> list[dict]:
     """
     Return distinct market_ids present in trader_positions but NOT yet in
