@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from executor.base import BaseExecutor
 import markets.polymarket as polymarket
 import db
@@ -88,6 +88,7 @@ class PaperExecutor(BaseExecutor):
             "peak_price":      fill_price,
             "exit_price":      None,
             "opened_at":       datetime.utcnow().isoformat(),
+            "hours_to_close_at_entry":  _hours_until(market.get("end_date")),
             "closed_at":       None,
             "status":          "open",
             "pnl":             None,
@@ -341,3 +342,16 @@ def _append_reason(existing: str | None, new: str) -> str:
     if existing:
         return f"{existing} → {new}"
     return new
+
+
+def _hours_until(end_date_str: str | None) -> float | None:
+    """Hours from now until end_date_str. Returns None if unparseable or missing."""
+    if not end_date_str:
+        return None
+    try:
+        end = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+        if end.tzinfo is None:
+            end = end.replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
+        return (end - datetime.now(timezone.utc)).total_seconds() / 3600
+    except Exception:
+        return None
