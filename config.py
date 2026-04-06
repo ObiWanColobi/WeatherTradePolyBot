@@ -78,7 +78,7 @@ WEATHER = {
     # never blocks a trade. Used to log CONFIRM/DIVERGE/NEUTRAL alongside each entry.
     "trader_monitor_poll_every_n":     10,    # run trader position poll every N bot polls (~10 min)
     "trader_monitor_max_wallets":     100,    # cap wallets polled per update pass (top by n_resolved)
-    "trader_consensus_min_resolved":   15,    # min resolved trades before a wallet counts in consensus
+    "trader_consensus_min_resolved":    6,    # min resolved trades before a wallet counts in consensus
     "trader_consensus_min_win_rate":   0.55,  # min win rate to count toward consensus signal
     "trader_consensus_confirm_count":   2,    # min same-direction traders to trigger CONFIRM signal
     "trader_discovery_min_trades":      5,    # min unique weather markets to qualify as a tracked trader

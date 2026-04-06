@@ -243,6 +243,8 @@ def score_wallets(wallet_map: dict) -> list[dict]:
         n_resolved = 0
         n_correct  = 0
         for t in data["trades"]:
+            if t.get("side", "").upper() != "BUY":
+                continue  # exits don't count as predictions
             actual = resolution_cache.get(t["condition_id"])
             if actual is None:
                 continue
