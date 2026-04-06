@@ -90,11 +90,11 @@ def _condition_ids_from_gamma() -> list[str]:
 
 
 def get_weather_condition_ids() -> list[str]:
-    print("Collecting weather market condition IDs...")
+    print("[discovery] Collecting weather market condition IDs...")
     from_db    = _condition_ids_from_trades_db()
     from_gamma = _condition_ids_from_gamma()
     combined   = list({*from_db, *from_gamma})
-    print(f"  {len(from_db)} from trade history  +  {len(from_gamma)} from Gamma  =  {len(combined)} unique")
+    print(f"[discovery]   {len(from_db)} from trade history  +  {len(from_gamma)} from Gamma  =  {len(combined)} unique")
     return combined
 
 
@@ -118,7 +118,7 @@ def harvest_wallets(condition_ids: list[str]) -> dict:
     wallet_map = {}
     total = len(condition_ids)
 
-    print(f"\nHarvesting trades from {total} weather markets...")
+    print(f"[discovery] Harvesting trades from {total} weather markets...")
 
     for i, cid in enumerate(condition_ids, 1):
         if i % 50 == 0 or i == total:
@@ -156,7 +156,7 @@ def harvest_wallets(condition_ids: list[str]) -> dict:
 
         time.sleep(API_DELAY)
 
-    print(f"  Done. {len(wallet_map)} unique wallets found across all markets.")
+    print(f"[discovery] Done. {len(wallet_map)} unique wallets found across all markets.")
     return wallet_map
 
 
@@ -201,7 +201,7 @@ def build_resolution_cache(wallet_map: dict) -> dict:
             if cid not in market_tokens and t.get("token_id"):
                 market_tokens[cid] = (t["token_id"], t["outcome"])
 
-    print(f"\nChecking resolution for {len(market_tokens)} unique markets via CLOB...")
+    print(f"[discovery] Checking resolution for {len(market_tokens)} unique markets via CLOB...")
 
     resolution_cache: dict[str, str] = {}
     for i, (cid, (token_id, outcome)) in enumerate(market_tokens.items(), 1):
@@ -223,7 +223,7 @@ def build_resolution_cache(wallet_map: dict) -> dict:
 
         time.sleep(API_DELAY)
 
-    print(f"  Done. {len(resolution_cache)} resolved out of {len(market_tokens)} checked.")
+    print(f"[discovery] Done. {len(resolution_cache)} resolved out of {len(market_tokens)} checked.")
     return resolution_cache
 
 
@@ -233,7 +233,7 @@ def score_wallets(wallet_map: dict) -> list[dict]:
     against CLOB-confirmed resolutions — no dependency on our own trade history.
     """
     qualifying  = _filter_qualifying(wallet_map)
-    print(f"\n{len(qualifying)} wallets passed filters (of {len(wallet_map)} total).")
+    print(f"[discovery] {len(qualifying)} wallets passed filters (of {len(wallet_map)} total).")
 
     resolution_cache = build_resolution_cache(qualifying)
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -284,9 +284,9 @@ def save_and_report(scored: list[dict]):
     for trader in scored:
         upsert_tracked_trader(trader)
 
-    print(f"\n{'='*70}")
-    print(f"  DISCOVERY RESULTS  —  {len(scored)} trader(s) added to tracked_traders")
-    print(f"{'='*70}")
+    print(f"[discovery] {'='*60}")
+    print(f"[discovery] RESULTS — {len(scored)} trader(s) upserted into tracked_traders")
+    print(f"[discovery] {'='*60}")
     print(f"  {'WALLET':<44}  {'PSEUDONYM':<22}  {'MKTS':>4}  {'RESOLVD':>7}  {'WIN%':>6}")
     print(f"  {'-'*44}  {'-'*22}  {'-'*4}  {'-'*7}  {'-'*6}")
 
@@ -301,11 +301,10 @@ def save_and_report(scored: list[dict]):
         )
 
     if len(scored) > 30:
-        print(f"  ... and {len(scored) - 30} more")
+        print(f"[discovery]   ... and {len(scored) - 30} more")
 
     scored_with_rate = [t for t in scored if t["win_rate"] is not None]
-    print(f"\n  {len(scored_with_rate)} trader(s) have resolved trade data for accuracy scoring.")
-    print(f"  Run again after more markets resolve to improve accuracy scores.\n")
+    print(f"[discovery] {len(scored_with_rate)} trader(s) have resolved trade data for accuracy scoring.")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

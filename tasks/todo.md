@@ -1,4 +1,4 @@
-# Weather Bot — Backlog (as of 2026-04-03)
+# Weather Bot — Backlog (as of 2026-04-06)
 
 Items completed this session have been removed. This list covers remaining work from the
 start-of-session roadmap plus ongoing gaps.
@@ -29,11 +29,13 @@ enabling per-trader accuracy scoring by city / season / geography over time.
 - [ ] Investigate `no_metadata` spike risk in untraded-freeze pass — `scanner_cache` only holds latest scan; older markets won't be found
 - [ ] Verify `global _last_ensemble_ts` / `_last_429_ts` timestamps actually update after first real ensemble fetch (`om.get_last_ensemble_ts()` should be non-zero)
 
+**Bug fixed 2026-04-06:** `settle_resolved` in `paper.py` was not writing `actual_resolution`, `forecast_correct`, or `resolution_price` for held-to-resolution trades, and never called `freeze_trader_forecasts`. Fixed at source — data now written at resolution time. 3 backfilled trades (#78 NYC, #80 Dallas, #84 Chicago).
+
 **Live testing checklist (first real market resolution):**
-- [ ] `SELECT * FROM trader_forecasts LIMIT 5` — confirm correct `direction`, `was_correct`, `entry_price`
+- [ ] `SELECT * FROM trader_forecasts LIMIT 5` — confirm correct `direction`, `was_correct`, `entry_price` *(pending: no tracked traders in resolved markets yet — pull cloud db when Atlanta/Miami Apr 7 resolve)*
 - [ ] Watch resolution pass logs for `[warn] freeze_trader_forecasts failed` or `[untraded-freeze] err=N`
-- [ ] After first temperature pass with data: confirm `actual_temperature` + `temperature_delta` populated
-- [ ] Check `no_coords` count in temp pass isn't unexpectedly high (city key mismatch risk)
+- [x] After first temperature pass with data: confirm `actual_temperature` + `temperature_delta` populated — **PASS** (27/27 closed trades)
+- [x] Check `no_coords` count in temp pass isn't unexpectedly high — **PASS** (all 12 traded city keys match `CITY_COORDS` exactly)
 
 ---
 
@@ -73,9 +75,9 @@ Size into winning positions rather than fixed-size single entries.
 
 ---
 
-## Model Accuracy Analysis (needs data)
+## Model Accuracy Analysis (nearly unblocked)
 
-Blocked until ~30+ resolved trades with `actual_temperature` populated.
+At 27 resolved trades with `actual_temperature` populated as of 2026-04-06. Early signal now possible.
 
 - [ ] YES warm bias investigation — are YES bets underperforming because model is warm-biased, or because of entry timing at thin-market hours?
 - [ ] Temperature delta histogram — distribution of |delta| at entry vs at resolution
@@ -101,5 +103,8 @@ Consider whether the decision layer can auto-tune its own thresholds based on re
 
 - [ ] Reverse-engineer Railbird's (user's wallet) apparent algorithm — what entry patterns show up in their trade history?
 - [ ] Dashboard: add "last discovery run" timestamp + trader count to a sidebar stat
-- [ ] `trader_discovery.py` — add scheduled auto-run (weekly?) so tracked_traders stays fresh without manual runs
+- [x] `trader_discovery.py` — weekly auto-run wired into calibration scheduler (daemon thread, non-blocking lock, timestamp written only on success)
+- [ ] Trader data review & cleanup — monthly review of `tracked_traders` to prune stale/low-quality wallets; consider a script that deactivates wallets inactive for >90 days or with n_resolved < threshold after sufficient data accumulates
+- [ ] Deploy discovery scheduling changes to cloud bot — note: first startup will immediately trigger a discovery run (no `discovery_last_run.txt` exists on server yet); expect `[discovery]` output in logs for ~5–10 min after restart
+- [ ] After first cloud discovery run: confirm `[discovery] Complete.` appears in logs and `tracked_traders` row count updates
 - [ ] Investigate AMM wallets as fade signals — if they're consistently on the wrong side of sharp money, that's information

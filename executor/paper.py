@@ -157,9 +157,11 @@ class PaperExecutor(BaseExecutor):
         token pays $1.00 per share, the losing token pays $0.00.
         P&L is symmetric for both directions.
         """
-        direction = trade.get("direction", "YES").upper()
-        won       = (direction == "YES" and resolved_yes) or \
-                    (direction == "NO"  and not resolved_yes)
+        direction       = trade.get("direction", "YES").upper()
+        won             = (direction == "YES" and resolved_yes) or \
+                          (direction == "NO"  and not resolved_yes)
+        actual          = "YES" if resolved_yes else "NO"
+        close_price     = 1.0 if resolved_yes else 0.0
 
         exit_price = 1.00 if won else 0.00
         proceeds   = trade["shares"] * exit_price
@@ -170,14 +172,35 @@ class PaperExecutor(BaseExecutor):
 
         db.update_balance(proceeds)
         db.update_trade(trade["id"], {
-            "exit_price":  1.00 if won else 0.00,
-            "closed_at":   datetime.utcnow().isoformat(),
-            "status":      "closed",
-            "pnl":         pnl,
-            "pnl_pct":     pnl_pct,
-            "exit_reason": "resolved",
+            "exit_price":        1.00 if won else 0.00,
+            "closed_at":         datetime.utcnow().isoformat(),
+            "status":            "closed",
+            "pnl":               pnl,
+            "pnl_pct":           pnl_pct,
+            "exit_reason":       "resolved",
+            "actual_resolution": actual,
+            "forecast_correct":  1 if won else 0,
+            "resolution_price":  close_price,
         })
         db.record_account_value()
+
+        # Freeze tracked-trader positions for this resolved market
+        city      = (trade.get("city") or "").lower()
+        end_date  = (trade.get("end_date") or "")[:10]
+        market_id = trade.get("market_id")
+        if market_id and city and end_date:
+            try:
+                frozen = db.freeze_trader_forecasts(
+                    market_id=market_id,
+                    close_price=close_price,
+                    city=city,
+                    end_date=end_date,
+                    threshold=trade.get("threshold"),
+                )
+                if frozen > 0:
+                    print(f"            froze {frozen} trader forecast(s) for {city} {end_date}")
+            except Exception as e:
+                print(f"            [warn] freeze_trader_forecasts failed: {e}")
 
         outcome = "WIN" if won else "LOSS"
         print(f"  [resolve] {outcome}  {trade['market_name'][:52]}")

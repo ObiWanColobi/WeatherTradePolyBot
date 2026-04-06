@@ -47,7 +47,9 @@ no manual intervention needed.
   Temperature: 1 archive call per unique city, once per UTC day max
   Both negligible vs ~57 ensemble calls/hour from the main bot loop.
 """
+import threading
 from datetime import datetime, timezone
+from pathlib import Path
 
 import db
 from weather_calibration import _run_resolution_pass, _run_temperature_pass
@@ -55,11 +57,73 @@ from weather_calibration import _run_resolution_pass, _run_temperature_pass
 # How many polls between resolution checks (~15 min at 60s poll interval)
 RESOLUTION_POLL_INTERVAL = 15
 
+# How many days between automatic trader discovery runs
+DISCOVERY_INTERVAL_DAYS = 7
+
+# Flat file storing ISO timestamp of last successful discovery run
+_DISCOVERY_TS_FILE = Path(__file__).parent / "discovery_last_run.txt"
+
+# Non-blocking lock — prevents double-run if weekly trigger fires mid-crawl
+_discovery_lock = threading.Lock()
+
 
 # ── Module-level state (in-memory, resets on bot restart — intentional) ───────
 
 _last_temp_date: str | None = None      # UTC date string 'YYYY-MM-DD' of last temp pass
 _last_temp_closed_count: int = 0        # closed trade count seen at last temp pass
+
+
+# ── Discovery helpers ─────────────────────────────────────────────────────────
+
+def _read_last_discovery_ts() -> datetime:
+    """Read timestamp of last successful discovery run. Returns epoch on any error."""
+    try:
+        text = _DISCOVERY_TS_FILE.read_text().strip()
+        ts = datetime.fromisoformat(text)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts
+    except Exception:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+
+
+def _run_discovery_thread():
+    """
+    Worker executed in a daemon thread. Runs trader_discovery.main() and writes
+    the success timestamp only after completion. Lock is always released via finally.
+    """
+    try:
+        print("[discovery] Starting weekly trader discovery run...")
+        import trader_discovery
+        trader_discovery.main()
+        # Write timestamp only after full success — a mid-run crash won't
+        # suppress retries for 7 days
+        _DISCOVERY_TS_FILE.write_text(datetime.now(timezone.utc).isoformat())
+        print("[discovery] Complete. Next run in 7 days.")
+    except Exception as e:
+        print(f"[discovery] Failed: {e}")
+    finally:
+        _discovery_lock.release()
+
+
+def _maybe_start_discovery():
+    """
+    Launch a background discovery run if 7+ days have passed since the last
+    successful run. No-ops silently if a run is already in progress.
+    """
+    last_run   = _read_last_discovery_ts()
+    days_since = (datetime.now(timezone.utc) - last_run).days
+    if days_since < DISCOVERY_INTERVAL_DAYS:
+        return
+
+    # Non-blocking acquire — if already running, skip without blocking the poll loop
+    if not _discovery_lock.acquire(blocking=False):
+        print("[discovery] Already running, skipping trigger.")
+        return
+
+    t = threading.Thread(target=_run_discovery_thread, daemon=True, name="trader-discovery")
+    t.start()
+    print(f"[discovery] Launched background thread (last run {days_since}d ago).")
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -149,6 +213,9 @@ def startup():
 
     print("[calibration] Startup catch-up complete.\n")
 
+    # Discovery: check at startup in case the bot was down over the weekly boundary
+    _maybe_start_discovery()
+
 
 def on_poll(poll_number: int):
     """
@@ -218,3 +285,7 @@ def on_poll(poll_number: int):
         # prevents hammering the archive API if fills repeatedly return 0
         _last_temp_date = today
         _last_temp_closed_count = current_closed
+
+    # ── Discovery: check once per UTC day, fire if 7+ days overdue ───────────
+    if is_new_day:
+        _maybe_start_discovery()
