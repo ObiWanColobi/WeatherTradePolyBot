@@ -173,15 +173,16 @@ class PaperExecutor(BaseExecutor):
 
         db.update_balance(proceeds)
         db.update_trade(trade["id"], {
-            "exit_price":        1.00 if won else 0.00,
-            "closed_at":         datetime.utcnow().isoformat(),
-            "status":            "closed",
-            "pnl":               pnl,
-            "pnl_pct":           pnl_pct,
-            "exit_reason":       "resolved",
-            "actual_resolution": actual,
-            "forecast_correct":  1 if won else 0,
-            "resolution_price":  close_price,
+            "exit_price":              1.00 if won else 0.00,
+            "closed_at":               datetime.utcnow().isoformat(),
+            "status":                  "closed",
+            "pnl":                     pnl,
+            "pnl_pct":                 pnl_pct,
+            "exit_reason":             "resolved",
+            "actual_resolution":       actual,
+            "forecast_correct":        1 if won else 0,
+            "resolution_price":        close_price,
+            "hours_to_close_at_exit":  _hours_until(trade.get("end_date")),
         })
         db.record_account_value()
 
@@ -215,12 +216,13 @@ class PaperExecutor(BaseExecutor):
 
         db.update_balance(proceeds)
         db.update_trade(trade["id"], {
-            "exit_price":  exit_price,
-            "closed_at":   datetime.utcnow().isoformat(),
-            "status":      "closed",
-            "pnl":         pnl,
-            "pnl_pct":     pnl_pct,
-            "exit_reason": _append_reason(trade.get("exit_reason"), reason),
+            "exit_price":              exit_price,
+            "closed_at":               datetime.utcnow().isoformat(),
+            "status":                  "closed",
+            "pnl":                     pnl,
+            "pnl_pct":                 pnl_pct,
+            "exit_reason":             _append_reason(trade.get("exit_reason"), reason),
+            "hours_to_close_at_exit":  _hours_until(trade.get("end_date")),
         })
         db.record_account_value()
 
