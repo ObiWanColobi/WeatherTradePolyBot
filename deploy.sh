@@ -16,7 +16,8 @@ PA_API="https://www.pythonanywhere.com/api/v0/user/$PA_USERNAME"
 
 echo "=== Pulling latest changes from GitHub ==="
 cd "$REPO_DIR"
-git pull origin main
+git fetch origin main
+git reset --hard origin/main
 
 echo "=== Installing/updating dependencies ==="
 pip install -r requirements.txt --quiet
