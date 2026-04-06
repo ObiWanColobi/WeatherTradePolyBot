@@ -182,7 +182,25 @@ def init_db():
         _safe_add_column(conn, "trades", "resolution_fetched_at", "TEXT")   # ISO timestamp of settlement confirmation
         _safe_add_column(conn, "trades", "actual_temperature",  "REAL")     # recorded daily max temp °C (Open-Meteo archive)
         _safe_add_column(conn, "trades", "temperature_delta",   "REAL")     # margin: positive = condition met (YES), negative = missed (NO)
-        _safe_add_column(conn, "trades", "volume_24h",           "REAL")     # 24h volume at time of entry (refreshed each poll)
+        _safe_add_column(conn, "trades", "volume_24h",              "REAL")     # 24h volume at time of entry (refreshed each poll)
+        _safe_add_column(conn, "trades", "hours_to_close_at_entry", "REAL")     # hours until market close at time of entry
+        _safe_add_column(conn, "trades", "hours_to_close_at_exit",  "REAL")     # hours until market close at time of exit
+
+        # Backfill hours_to_close for trades that predate this column
+        conn.executescript("""
+            UPDATE trades
+               SET hours_to_close_at_entry = (julianday(end_date) - julianday(opened_at)) * 24.0
+             WHERE hours_to_close_at_entry IS NULL
+               AND end_date IS NOT NULL
+               AND opened_at IS NOT NULL;
+
+            UPDATE trades
+               SET hours_to_close_at_exit = (julianday(end_date) - julianday(closed_at)) * 24.0
+             WHERE hours_to_close_at_exit IS NULL
+               AND end_date IS NOT NULL
+               AND closed_at IS NOT NULL
+               AND status = 'closed';
+        """)
 
 
 def _safe_add_column(conn: sqlite3.Connection, table: str, column: str, col_type: str):
