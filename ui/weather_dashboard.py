@@ -272,8 +272,9 @@ if open_trades:
             "Tr Ens":       _tr_ens(t.get("market_id", ""), t.get("direction", "")),
             "Fill":         round(t["fill_price"], 3),
             "Current":      round(t.get("current_price") or t["fill_price"], 3),
-            "Unreal. P&L":  round(unreal, 2),
-            "Size $":       round(t["size_usdc"], 2),
+            "Unreal. P&L":   round(unreal, 2),
+            "Unreal. P&L %": round((unreal / t["size_usdc"]) * 100, 1) if t["size_usdc"] else None,
+            "Size $":        round(t["size_usdc"], 2),
             "Vol 24h":      round(t["volume_24h"]) if t.get("volume_24h") else None,
             "Closes":       _fmt_hours(h),
             "Market":       url or t.get("market_name", ""),
@@ -286,8 +287,9 @@ if open_trades:
         "Model %":     st.column_config.NumberColumn(format="%.1f%%"),
         "Mkt %":       st.column_config.NumberColumn(format="%.1f%%"),
         "Size $":      st.column_config.NumberColumn(format="$%.2f"),
-        "Unreal. P&L": st.column_config.NumberColumn(format="$%.2f"),
-        "Vol 24h":     st.column_config.NumberColumn(format="$%d"),
+        "Unreal. P&L":   st.column_config.NumberColumn(format="$%.2f"),
+        "Unreal. P&L %": st.column_config.NumberColumn(format="%.1f%%"),
+        "Vol 24h":       st.column_config.NumberColumn(format="$%d"),
     }
     if any(r["Market"].startswith("http") for r in rows):
         col_cfg["Market"] = st.column_config.LinkColumn(
@@ -376,6 +378,15 @@ if closed_trades:
     rows = []
     for t in closed_trades:
         url = t.get("market_url") or ""
+        ens_yes = t.get("entry_ensemble_yes")
+        ens_n   = t.get("entry_ensemble_n")
+        ens_pct = t.get("entry_ensemble_pct")
+        if ens_yes is not None and ens_n:
+            ens_str = f"{int(ens_yes)}/{int(ens_n)}"
+        elif ens_pct is not None:
+            ens_str = f"{ens_pct:.0%}"
+        else:
+            ens_str = "—"
         rows.append({
             "City":         (t.get("city") or "—").title(),
             "Threshold":    _parse_threshold(t),
@@ -384,12 +395,15 @@ if closed_trades:
             "Edge %":       round(t.get("edge_score") or 0, 1),
             "Model %":      round((t.get("estimated_prob") or 0) * 100, 1),
             "Mkt %":        round((t.get("entry_price") or 0) * 100, 1),
+            "Ens. Entry":   ens_str,
             "Tr Ens":       _tr_ens(t.get("market_id", ""), t.get("direction", "")),
             "Fill":         round(t["fill_price"], 3),
             "Exit":         round(t.get("exit_price") or 0, 3),
             "P&L $":        round(t.get("pnl") or 0, 2),
             "P&L %":        round(t.get("pnl_pct") or 0, 1),
             "Size $":       round(t["size_usdc"], 2),
+            "Hrs @ Entry":  _fmt_hours(t.get("hours_to_close_at_entry")),
+            "Hrs @ Exit":   _fmt_hours(t.get("hours_to_close_at_exit")),
             "Vol 24h":      round(t["volume_24h"]) if t.get("volume_24h") else None,
             "Exit Reason":  (t.get("exit_reason") or "resolved")[:40],
             "Market":       url or t.get("market_name", ""),
