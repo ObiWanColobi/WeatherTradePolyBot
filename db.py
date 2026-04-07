@@ -185,6 +185,7 @@ def init_db():
         _safe_add_column(conn, "trades", "volume_24h",              "REAL")     # 24h volume at time of entry (refreshed each poll)
         _safe_add_column(conn, "trades", "hours_to_close_at_entry", "REAL")     # hours until market close at time of entry
         _safe_add_column(conn, "trades", "hours_to_close_at_exit",  "REAL")     # hours until market close at time of exit
+        _safe_add_column(conn, "trades", "resolution_attempts",     "INTEGER")  # no_data/404 hit count; stop retrying at threshold
 
         # Backfill hours_to_close for trades that predate this column
         conn.executescript("""
@@ -585,7 +586,11 @@ def freeze_trader_forecasts(
 
     Args:
         market_id:  condition_id of the resolved market
-        close_price: CLOB midpoint at settlement (~0.001 or ~0.999)
+        close_price: CLOB midpoint at settlement (~0.001 or ~0.999), expressed as
+                     the YES-token price. IMPORTANT: callers must invert NO-token
+                     midpoints before passing (i.e. close_price = 1.0 - raw_midpoint
+                     for NO trades). This function always interprets close_price from
+                     the YES side to determine actual_resolution.
         city:       city this market was for (denormalized)
         end_date:   YYYY-MM-DD resolution date (denormalized)
         threshold:  threshold string e.g. ">=75" (denormalized, nullable)

@@ -182,6 +182,7 @@ def _run_untraded_freeze_pass(quiet: bool = False) -> dict:
 
 def _run_resolution_pass(quiet: bool = False) -> dict:
     all_trades = db.get_all_trades()
+    _MAX_RESOLUTION_ATTEMPTS = 10
     candidates = [
         t for t in all_trades
         if t.get("status") == "closed"
@@ -189,6 +190,7 @@ def _run_resolution_pass(quiet: bool = False) -> dict:
         and "resolved" not in (t.get("exit_reason") or "").lower()
         and t.get("actual_resolution") is None
         and t.get("token_id")
+        and (t.get("resolution_attempts") or 0) < _MAX_RESOLUTION_ATTEMPTS
     ]
 
     counts = {"resolved": 0, "settling": 0, "no_data": 0}
@@ -205,9 +207,18 @@ def _run_resolution_pass(quiet: bool = False) -> dict:
 
     for trade in candidates:
         yes_price = _clob_midpoint(trade["token_id"])
+        direction = (trade.get("direction") or "").upper()
+
+        # For NO-direction trades the stored token_id is the NO token,
+        # so invert to get the YES-equivalent price (mirrors weather_resolver.py:88-89).
+        if direction == "NO" and yes_price is not None:
+            yes_price = 1.0 - yes_price
 
         if yes_price is None:
             counts["no_data"] += 1
+            db.update_trade(trade["id"], {
+                "resolution_attempts": (trade.get("resolution_attempts") or 0) + 1,
+            })
             label = "404 / no data"
         elif yes_price >= _CLOB_YES:
             actual = "YES"
@@ -227,8 +238,6 @@ def _run_resolution_pass(quiet: bool = False) -> dict:
                 print(f"    skip  {city:<12}  {label}")
             time.sleep(0.15)
             continue
-
-        direction = (trade.get("direction") or "").upper()
         correct   = 1 if direction == actual else 0
 
         db.update_trade(trade["id"], {

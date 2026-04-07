@@ -37,6 +37,7 @@ _TOP_CITIES              = set(WEATHER.get("top_cities",                []))
 _MAX_SPREAD_CENTS        = WEATHER.get("entry_max_spread_cents",        0.10)
 _MIN_HOURS_TO_CLOSE      = WEATHER.get("entry_min_hours_to_close",      2.0)
 _MIN_FILL_PRICE          = WEATHER.get("entry_min_fill_price",          0.15)
+_MIN_FILL_PRICE_YES      = WEATHER.get("entry_min_fill_price_yes",      0.25)
 _MIN_ENSEMBLE_MARGIN_C   = WEATHER.get("entry_min_ensemble_margin_c",   2.0)
 
 
@@ -160,15 +161,16 @@ def check_entry(market: dict, scan_data: dict, direction: str | None = None) -> 
     if direction is not None:
         yes_price   = market.get("price", 0.5)
         fill_price  = yes_price if direction.lower() == "yes" else (1.0 - yes_price)
+        floor       = _MIN_FILL_PRICE_YES if direction.lower() == "yes" else _MIN_FILL_PRICE
         checks["min_fill_price"] = {
-            "ok":    fill_price >= _MIN_FILL_PRICE,
+            "ok":    fill_price >= floor,
             "value": f"${fill_price:.3f}",
-            "need":  f">=${_MIN_FILL_PRICE:.2f}",
+            "need":  f">=${floor:.2f}",
         }
         if not checks["min_fill_price"]["ok"]:
             return EntryDecision(
                 ok=False,
-                reason=f"token price ${fill_price:.3f} below minimum ${_MIN_FILL_PRICE:.2f} — noise risk too high",
+                reason=f"token price ${fill_price:.3f} below minimum ${floor:.2f} — noise risk too high",
                 checks=checks,
             )
 
