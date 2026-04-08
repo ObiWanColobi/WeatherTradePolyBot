@@ -451,8 +451,7 @@ if open_trades:
                 _risk_mgr.add_manual_close(t.get("market_id", ""))
                 print(f"[risk] manual close: {t.get('market_name', '')[:50]}")
                 st.session_state[state_key] = False
-                st.success(f"Closed {city} {direction} {threshold}.")
-                time.sleep(1)
+                st.toast(f"Closed {city} {direction} {threshold}.")
                 st.rerun()
         with c2:
             if st.button("❌ Cancel", key=f"btn_cancel_{trade_id}"):

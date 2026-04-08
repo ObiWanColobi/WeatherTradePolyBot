@@ -315,15 +315,23 @@ def run(dry_run: bool = False):
     balance = db.get_balance()
     print(f"[bot] Balance: ${balance:,.2f}\n")
 
-    poll         = 0
+    poll             = 0
     already_traded: set = set()
+    _prev_open_ids: set = set()
 
     while True:
         poll += 1
         now_str = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
         print(f"\n{'─' * 60}")
-        _open_n = len(db.get_open_trades())
-        print(f"[bot] Poll #{poll}  {now_str}  balance=${db.get_balance():,.2f}  open={_open_n}")
+        _cur_open     = db.get_open_trades()
+        _cur_open_ids = {t["id"] for t in _cur_open}
+        print(f"[bot] Poll #{poll}  {now_str}  balance=${db.get_balance():,.2f}  open={len(_cur_open_ids)}")
+
+        # Detect trades closed externally between polls (e.g. dashboard manual close)
+        # _prev_open_ids is set at end of last poll — so anything missing now wasn't closed by the bot
+        if _prev_open_ids:
+            for tid in _prev_open_ids - _cur_open_ids:
+                print(f"[bot] Trade #{tid} was closed externally (dashboard manual close).")
 
         # Periodic layer refresh (clears stale ensemble cache)
         if poll % CACHE_REFRESH == 0:
@@ -370,6 +378,9 @@ def run(dry_run: bool = False):
                 _trader_monitor.update(weather_condition_ids)
             except Exception as e:
                 print(f"[trader_monitor] update error (non-fatal): {e}")
+
+        # Snapshot open IDs at end of poll for external-close detection next poll
+        _prev_open_ids = {t["id"] for t in db.get_open_trades()}
 
         time.sleep(POLL_INTERVAL)
 
