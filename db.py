@@ -313,6 +313,13 @@ def get_open_trade_for_market(market_id: str) -> dict | None:
         return dict(row) if row else None
 
 
+def get_trade_by_id(trade_id: int) -> dict | None:
+    """Return a single trade row by ID, or None if not found."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM trades WHERE id = ?", (trade_id,)).fetchone()
+        return dict(row) if row else None
+
+
 def get_trades_today() -> int:
     """Count new positions opened since midnight UTC today."""
     today = datetime.now(timezone.utc).date().isoformat()  # "YYYY-MM-DD"

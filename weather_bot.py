@@ -317,7 +317,7 @@ def run(dry_run: bool = False):
 
     poll             = 0
     already_traded: set = set()
-    _prev_open_ids: set = set()
+    _prev_open_map: dict = {}   # id → trade dict, snapshot from end of last poll
 
     while True:
         poll += 1
@@ -328,10 +328,16 @@ def run(dry_run: bool = False):
         print(f"[bot] Poll #{poll}  {now_str}  balance=${db.get_balance():,.2f}  open={len(_cur_open_ids)}")
 
         # Detect trades closed externally between polls (e.g. dashboard manual close)
-        # _prev_open_ids is set at end of last poll — so anything missing now wasn't closed by the bot
-        if _prev_open_ids:
-            for tid in _prev_open_ids - _cur_open_ids:
-                print(f"[bot] Trade #{tid} was closed externally (dashboard manual close).")
+        # _prev_open_map is set at end of last poll — anything missing now wasn't closed by the bot
+        if _prev_open_map:
+            for tid, t in _prev_open_map.items():
+                if tid not in _cur_open_ids:
+                    city      = (t.get("city") or "?").title()
+                    direction = t.get("direction", "?").upper()
+                    threshold = t.get("threshold") or "?"
+                    closed    = db.get_trade_by_id(tid)
+                    pnl       = (closed.get("pnl") or 0.0) if closed else 0.0
+                    print(f"[bot] Externally closed: {city} {direction} {threshold}  P&L: ${pnl:+.2f}")
 
         # Periodic layer refresh (clears stale ensemble cache)
         if poll % CACHE_REFRESH == 0:
@@ -379,8 +385,8 @@ def run(dry_run: bool = False):
             except Exception as e:
                 print(f"[trader_monitor] update error (non-fatal): {e}")
 
-        # Snapshot open IDs at end of poll for external-close detection next poll
-        _prev_open_ids = {t["id"] for t in db.get_open_trades()}
+        # Snapshot open trades at end of poll for external-close detection next poll
+        _prev_open_map = {t["id"]: t for t in db.get_open_trades()}
 
         time.sleep(POLL_INTERVAL)
 
