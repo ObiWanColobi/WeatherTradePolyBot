@@ -473,6 +473,25 @@ def get_stats() -> dict:
         }
 
 
+def get_today_realized_losses() -> tuple[int, float]:
+    """Return (count, total_usdc) of losing trades closed today (UTC).
+
+    Only counts trades with negative P&L. Winning trades do not offset.
+    Used by the daily loss circuit breaker in weather_risk.py.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS cnt, COALESCE(SUM(ABS(pnl)), 0.0) AS total
+            FROM trades
+            WHERE status = 'closed'
+              AND pnl < 0
+              AND DATE(closed_at) = DATE('now')
+            """
+        ).fetchone()
+        return int(row["cnt"]), float(row["total"])
+
+
 # ── Scanner cache ────────────────────────────────────────────────────────────
 
 _SCAN_CACHE_FIELDS = {
