@@ -340,6 +340,12 @@ def run(dry_run: bool = False):
         settled = run_resolve_pass(_executor)
         if settled:
             print(f"\n[bot] Settled {settled} resolved position(s).")
+            # Clean up block list — remove resolved markets
+            if _risk_manager:
+                open_mids = db.get_open_market_ids()
+                for mid in _risk_manager._read_block_list():
+                    if mid not in open_mids:
+                        _risk_manager.clear_resolved(mid)
 
         # Risk check — portfolio-level circuit breaker
         risk_state = _risk_manager.check()
