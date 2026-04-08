@@ -15,6 +15,7 @@ enabling per-trader accuracy scoring by city / season / geography over time.
 - [x] Join with calibration data (`actual_temperature`, `temperature_delta`) for city/region breakdown
 - [x] Report view in dashboard: per-trader accuracy by region, by season, by edge tier
 - [ ] Weight ensemble consensus by each trader's accuracy score (currently all qualified traders are equal weight)
+- [x] Brier Score tracking — implemented in `db.py` and displayed on dashboard Trader Accuracy section
 
 ### Stage 2 Follow-ups (deferred, from 2026-04-04 design)
 
@@ -37,10 +38,10 @@ enabling per-trader accuracy scoring by city / season / geography over time.
 
 **Live testing checklist (first real market resolution):**
 - [x] `SELECT * FROM trader_forecasts LIMIT 5` — **PASS** (2 rows for Miami Apr 7, corrected by repair script 2026-04-07)
-- [ ] Watch resolution pass logs for `[warn] freeze_trader_forecasts failed` or `[untraded-freeze] err=N`
+- [x] Watch resolution pass logs for `[warn] freeze_trader_forecasts failed` or `[untraded-freeze] err=N` — no issues observed
 - [x] After first temperature pass with data: confirm `actual_temperature` + `temperature_delta` populated — **PASS** (35/36 closed trades)
 - [x] Check `no_coords` count in temp pass isn't unexpectedly high — **PASS** (all 12 traded city keys match `CITY_COORDS` exactly)
-- [ ] Post-repair: verify new resolutions produce correct `forecast_correct` for NO-direction trades
+- [x] Post-repair: verify new resolutions produce correct `forecast_correct` for NO-direction trades — verified after cloud deployment
 
 ---
 
@@ -57,14 +58,21 @@ Size into winning positions rather than fixed-size single entries.
 
 ---
 
-## Risk Management Gaps
+## Risk Management — DESIGNED, IMPLEMENTATION PENDING
 
-- [ ] Max drawdown halt — auto-stop bot if total unrealized + realized loss exceeds 8% of starting balance
-- [ ] Daily loss limit — halt entries if same-day closed P&L < -$X (configurable)
-- [ ] Kill switch — check for `STOP` file at top of each poll loop; exit cleanly if present
-- [ ] VaR(95%) display on dashboard — estimated max daily loss at current position sizes
-- [ ] Brier Score tracking — proper calibration metric alongside win rate
-- [ ] Close all button on the UI so user can exit the market immediately as needed
+Spec: `docs/superpowers/specs/2026-04-07-risk-management-design.md`
+Plan: `docs/superpowers/plans/2026-04-07-risk-management.md` (10 tasks)
+
+- [ ] Daily loss circuit breaker — 15% of account value (realized losses only), halts entries
+- [ ] Circuit breaker override — dashboard button, suppresses for remainder of UTC day
+- [ ] Close all button — dashboard sidebar, double confirmation, re-entry block
+- [ ] Per-trade close button — per row in open positions table, double confirmation, re-entry block
+- [ ] Re-entry block list — JSON file IPC, prevents bot re-entering manually closed markets
+- [ ] Risk status banner — red HALTED banner on dashboard when circuit breaker trips
+- [ ] Email notifications — SMTP alerts for circuit breaker + manual close-all events
+- [x] ~~Max drawdown halt~~ — intentionally excluded (not appropriate for prediction markets)
+- [x] ~~Kill switch (STOP file)~~ — intentionally excluded (dashboard controls + process stop suffice)
+- [x] ~~VaR(95%)~~ — intentionally excluded (binary outcomes, not useful)
 
 ---
 
@@ -74,8 +82,8 @@ At 35 resolved trades with `actual_temperature` populated as of 2026-04-07. True
 
 - [x] YES warm bias investigation — **answered 2026-04-07:** YES underperformance is NOT warm bias. It's cheap-token adverse exits. 27% win rate on YES, but several correct forecasts (Seoul #76/#86, delta=+4.6C) killed by adverse exits on $0.09-$0.14 fills. Fixed by raising YES min_fill to $0.25.
 - [ ] Temperature delta histogram — distribution of |delta| at entry vs at resolution
-- [ ] Edge tier calibration — does STRONG (≥30%) actually outperform EDGE (15-30%)?
-- [ ] City-level accuracy report — which cities does the model forecast worst?
+- [x] Edge tier calibration — implemented in `weather_calibration.py` (W/E/S tier breakdown in report)
+- [x] City-level accuracy report — implemented in `weather_calibration.py` ("breakdown by City" in report)
 
 ---
 
@@ -97,6 +105,6 @@ Consider whether the decision layer can auto-tune its own thresholds based on re
 - [ ] Dashboard: add "last discovery run" timestamp + trader count to a sidebar stat
 - [x] `trader_discovery.py` — weekly auto-run wired into calibration scheduler (daemon thread, non-blocking lock, timestamp written only on success)
 - [ ] Trader data review & cleanup — monthly review of `tracked_traders` to prune stale/low-quality wallets; consider a script that deactivates wallets inactive for >90 days or with n_resolved < threshold after sufficient data accumulates
-- [ ] Deploy discovery scheduling changes to cloud bot — note: first startup will immediately trigger a discovery run (no `discovery_last_run.txt` exists on server yet); expect `[discovery]` output in logs for ~5–10 min after restart
-- [ ] After first cloud discovery run: confirm `[discovery] Complete.` appears in logs and `tracked_traders` row count updates
+- [x] Deploy discovery scheduling changes to cloud bot — deployed to PythonAnywhere
+- [x] After first cloud discovery run: confirm `[discovery] Complete.` appears in logs and `tracked_traders` row count updates — verified
 - [ ] Investigate AMM wallets as fade signals — if they're consistently on the wrong side of sharp money, that's information
