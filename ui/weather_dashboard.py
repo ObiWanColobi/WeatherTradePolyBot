@@ -243,6 +243,51 @@ trades_today  = sum(1 for t in all_trades if (t.get("opened_at") or "").startswi
 st.title("🌤️ Weather Trading Bot — Paper Mode")
 st.caption(f"Auto-refreshes every {REFRESH_INTERVAL}s · last loaded {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
 
+# ── Risk banner ──────────────────────────────────────────────────────────────
+
+_risk_status = _risk_mgr.get_status_display()
+if _risk_status["state"] == "HALTED" and not _risk_status["overridden"]:
+    with st.container():
+        st.error(
+            f"**ENTRIES HALTED** — Daily loss limit reached "
+            f"({_risk_status['loss_pct']:.1%} of account lost today, "
+            f"limit: {_risk_status['limit_pct']:.0%}). "
+            f"{_risk_status['today_count']} losing trade(s), "
+            f"${_risk_status['today_losses']:.2f} total."
+        )
+        st.caption(f"Tripped at: {(_risk_status['halted_at'] or '')[:19]} UTC")
+
+        # Override button with double confirmation
+        if "confirm_override" not in st.session_state:
+            st.session_state.confirm_override = False
+        if "override_time" not in st.session_state:
+            st.session_state.override_time = None
+
+        if not st.session_state.confirm_override:
+            if st.button("Override — Resume Entries"):
+                st.session_state.confirm_override = True
+                st.session_state.override_time = time.time()
+                st.rerun()
+        else:
+            elapsed = time.time() - (st.session_state.override_time or 0)
+            if elapsed > 10:
+                st.session_state.confirm_override = False
+                st.rerun()
+
+            st.warning("Circuit breaker will be suppressed until tomorrow. Are you sure?")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("✅ Confirm Override", type="primary"):
+                    _risk_mgr.override_for_today()
+                    st.session_state.confirm_override = False
+                    st.success("Override active — entries resumed for today.")
+                    time.sleep(1)
+                    st.rerun()
+            with c2:
+                if st.button("❌ Cancel Override"):
+                    st.session_state.confirm_override = False
+                    st.rerun()
+
 # ── Top metrics ───────────────────────────────────────────────────────────────
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
