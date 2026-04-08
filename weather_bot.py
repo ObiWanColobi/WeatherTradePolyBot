@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 
 import db
 from config import WEATHER, PAPER_STARTING_BALANCE
+from weather_risk import RiskManager, RiskState
 from layers.layer3_weather import WeatherLayer
 from executor.paper import PaperExecutor
 from executor.weather_exit import check_weather_exit
@@ -34,8 +35,9 @@ CACHE_REFRESH          = WEATHER.get("bot_cache_refresh_polls",    10)
 DEFAULT_MAX_BET        = WEATHER.get("kelly_max_bet_usdc",         50.00)
 TRADER_MONITOR_EVERY_N = WEATHER.get("trader_monitor_poll_every_n", 10)
 
-_layer    = WeatherLayer()
-_executor = PaperExecutor()
+_layer        = WeatherLayer()
+_executor     = PaperExecutor()
+_risk_manager: RiskManager | None = None
 
 
 # -- Startup prompt -----------------------------------------------------------
@@ -280,6 +282,9 @@ def _prompt_startup() -> bool:
 
 def run(dry_run: bool = False):
     db.init_db()
+    global _risk_manager
+    _risk_manager = RiskManager()
+    _risk_manager.startup_cleanup()
     _prompt_startup()
 
     print("[bot] Weather Trading Bot — paper mode")
@@ -336,13 +341,22 @@ def run(dry_run: bool = False):
         if settled:
             print(f"\n[bot] Settled {settled} resolved position(s).")
 
-        # Exit pass
+        # Risk check — portfolio-level circuit breaker
+        risk_state = _risk_manager.check()
+
+        # Exit pass (always runs — existing per-trade exit logic is independent of risk state)
         run_exit_pass()
 
-        # Entry pass — also returns the full weather condition_id set from the scan
-        entered, weather_condition_ids = run_entry_pass(already_traded, max_bet, dry_run=dry_run)
-        if entered:
-            print(f"\n[bot] Entered {entered} new position(s) this poll.")
+        # Entry pass — blocked when circuit breaker is tripped
+        if risk_state == RiskState.NORMAL:
+            entered, weather_condition_ids = run_entry_pass(already_traded, max_bet, dry_run=dry_run)
+            if entered:
+                print(f"\n[bot] Entered {entered} new position(s) this poll.")
+        else:
+            print(f"[risk] Entries halted — daily losses: ${_risk_manager._today_losses:.2f} "
+                  f"({_risk_manager.get_loss_pct():.1%} of account)")
+            entered = 0
+            weather_condition_ids = set()
 
         # Trader monitor — poll tracked wallets for live positions every 10 polls
         if poll % TRADER_MONITOR_EVERY_N == 0:
