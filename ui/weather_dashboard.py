@@ -104,6 +104,15 @@ def _parse_threshold(row: dict) -> str:
 
 _risk_mgr = RiskManager()
 
+# ── Load DB data ──────────────────────────────────────────────────────────────
+
+cash          = db.get_balance() or PAPER_STARTING_BALANCE
+all_trades    = db.get_all_trades()
+open_trades   = [t for t in all_trades if t["status"] == "open"]
+HISTORY_CUTOFF = "2026-04-02T20:52"
+closed_trades = [t for t in all_trades if t["status"] == "closed" and (t.get("opened_at") or "") > HISTORY_CUTOFF]
+stats         = db.get_stats()
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -218,15 +227,6 @@ with st.sidebar:
             if st.button("❌ Cancel"):
                 st.session_state.confirm_reset = False
                 st.rerun()
-
-# ── Load DB data ──────────────────────────────────────────────────────────────
-
-cash          = db.get_balance() or PAPER_STARTING_BALANCE
-all_trades    = db.get_all_trades()
-open_trades   = [t for t in all_trades if t["status"] == "open"]
-HISTORY_CUTOFF = "2026-04-02T20:52"
-closed_trades = [t for t in all_trades if t["status"] == "closed" and (t.get("opened_at") or "") > HISTORY_CUTOFF]
-stats         = db.get_stats()
 
 unrealized    = sum(_unreal_pnl(t) for t in open_trades)
 position_val  = sum((t.get("current_price") or t["fill_price"]) * t["shares"] for t in open_trades)
