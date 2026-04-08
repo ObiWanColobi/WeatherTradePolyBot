@@ -22,6 +22,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import db
 from config import WEATHER, PAPER_STARTING_BALANCE
+from weather_risk import RiskManager
+from executor.paper import PaperExecutor
 
 
 def _tr_ens(market_id: str, direction: str) -> str:
@@ -125,6 +127,64 @@ with st.sidebar:
 
     st.divider()
 
+    # ── Risk Status ──────────────────────────────────────────────────────────
+    st.subheader("Risk Status")
+    loss_count, loss_total = db.get_today_realized_losses()
+    st.caption(f"Losses today: {loss_count} trades, ${loss_total:.2f}")
+    st.caption(f"Loss limit: {WEATHER.get('risk_daily_loss_limit_pct', 0.15):.0%} of account")
+
+    st.divider()
+
+    # ── Close All Positions ──────────────────────────────────────────────────
+    st.subheader("Manual Controls")
+
+    if "confirm_close_all" not in st.session_state:
+        st.session_state.confirm_close_all = False
+    if "close_all_time" not in st.session_state:
+        st.session_state.close_all_time = None
+
+    if open_trades:
+        if not st.session_state.confirm_close_all:
+            if st.button("🔴 Close All Positions", type="secondary"):
+                st.session_state.confirm_close_all = True
+                st.session_state.close_all_time = time.time()
+                st.rerun()
+        else:
+            elapsed = time.time() - (st.session_state.close_all_time or 0)
+            if elapsed > 10:
+                st.session_state.confirm_close_all = False
+                st.rerun()
+
+            st.warning(f"Close ALL {len(open_trades)} open positions?")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("✅ Confirm Close All", type="primary"):
+                    executor = PaperExecutor()
+                    closed_ids = []
+                    for t in open_trades:
+                        executor.close_full(t, reason="manual_close_all")
+                        _risk_mgr.add_manual_close(t.get("market_id", ""))
+                        closed_ids.append(t.get("market_name", "")[:40])
+                        print(f"[risk] manual close-all: {t.get('market_name', '')[:50]}")
+                    _risk_mgr.send_alert(
+                        "manual_close_all",
+                        f"All positions closed manually.\n\n"
+                        f"Closed {len(closed_ids)} positions:\n" +
+                        "\n".join(f"  - {name}" for name in closed_ids),
+                    )
+                    st.session_state.confirm_close_all = False
+                    st.success(f"Closed {len(closed_ids)} positions.")
+                    time.sleep(1)
+                    st.rerun()
+            with c2:
+                if st.button("❌ Cancel"):
+                    st.session_state.confirm_close_all = False
+                    st.rerun()
+    else:
+        st.caption("No open positions to close.")
+
+    st.divider()
+
     if st.button("🔄 Refresh Now"):
         st.rerun()
 
@@ -162,6 +222,7 @@ with st.sidebar:
 cash          = db.get_balance() or PAPER_STARTING_BALANCE
 all_trades    = db.get_all_trades()
 open_trades   = [t for t in all_trades if t["status"] == "open"]
+_risk_mgr     = RiskManager()
 HISTORY_CUTOFF = "2026-04-02T20:52"
 closed_trades = [t for t in all_trades if t["status"] == "closed" and (t.get("opened_at") or "") > HISTORY_CUTOFF]
 stats         = db.get_stats()
