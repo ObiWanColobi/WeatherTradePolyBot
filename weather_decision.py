@@ -30,6 +30,7 @@ import db
 from markets.polymarket import simulate_fill
 from weather_entry import check_entry
 from weather_sizing import kelly_size
+from weather_risk import RiskManager
 import trader_monitor
 
 # -- Config -------------------------------------------------------------------
@@ -61,6 +62,7 @@ def evaluate(
     candidates:       list[dict],
     balance:          float,
     max_bet_override: float | None = None,
+    risk_manager:     RiskManager | None = None,
 ) -> list[DecisionResult]:
     """
     Evaluate all scanner candidates and return decision results.
@@ -136,6 +138,17 @@ def evaluate(
                 candidate=candidate,
                 verdict="REJECTED",
                 reason=f"duplicate: already holding this market ({city} {res_date})",
+                direction=direction,
+                checks=entry.checks,
+            ))
+            continue
+
+        # ── 2c. Manual close block — re-entry prevention ────────────────────
+        if risk_manager and market_id and risk_manager.is_blocked(market_id):
+            rejected.append(DecisionResult(
+                candidate=candidate,
+                verdict="REJECTED",
+                reason=f"manually closed this session ({city} {res_date})",
                 direction=direction,
                 checks=entry.checks,
             ))

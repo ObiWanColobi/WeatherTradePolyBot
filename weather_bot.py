@@ -153,7 +153,7 @@ def run_entry_pass(already_traded: set, max_bet: float, dry_run: bool = False) -
         print("  [entry] No scanner candidates after session filter.")
         return 0, weather_condition_ids
 
-    results  = evaluate(candidates, balance, max_bet_override=max_bet)
+    results  = evaluate(candidates, balance, max_bet_override=max_bet, risk_manager=_risk_manager)
     approved = [r for r in results if r.verdict == "APPROVED"]
     rejected = [r for r in results if r.verdict == "REJECTED"]
 
