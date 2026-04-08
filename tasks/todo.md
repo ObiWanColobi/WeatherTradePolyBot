@@ -1,4 +1,4 @@
-# Weather Bot — Backlog (as of 2026-04-06)
+# Weather Bot — Backlog (as of 2026-04-07)
 
 Items completed this session have been removed. This list covers remaining work from the
 start-of-session roadmap plus ongoing gaps.
@@ -31,24 +31,16 @@ enabling per-trader accuracy scoring by city / season / geography over time.
 
 **Bug fixed 2026-04-06:** `settle_resolved` in `paper.py` was not writing `actual_resolution`, `forecast_correct`, or `resolution_price` for held-to-resolution trades, and never called `freeze_trader_forecasts`. Fixed at source — data now written at resolution time. 3 backfilled trades (#78 NYC, #80 Dallas, #84 Chicago).
 
+**Bug fixed 2026-04-07:** Calibration inversion bug — `weather_calibration.py` didn't invert CLOB midpoint for NO-direction trades. Corrupted `forecast_correct` and `actual_resolution` for 20 trades + 2 trader_forecasts. Fixed in code + repaired via `repair_forecast_data.py --apply`. True forecast accuracy: 73.5% (was incorrectly reported as 32.1%).
+
+**Also fixed 2026-04-07:** Resolution retry cap (10 max attempts for no_data trades), ensemble margin raised 2C->3C, YES min_fill_price raised $0.15->$0.25.
+
 **Live testing checklist (first real market resolution):**
-- [ ] `SELECT * FROM trader_forecasts LIMIT 5` — confirm correct `direction`, `was_correct`, `entry_price` *(pending: no tracked traders in resolved markets yet — pull cloud db when Atlanta/Miami Apr 7 resolve)*
+- [x] `SELECT * FROM trader_forecasts LIMIT 5` — **PASS** (2 rows for Miami Apr 7, corrected by repair script 2026-04-07)
 - [ ] Watch resolution pass logs for `[warn] freeze_trader_forecasts failed` or `[untraded-freeze] err=N`
-- [x] After first temperature pass with data: confirm `actual_temperature` + `temperature_delta` populated — **PASS** (27/27 closed trades)
+- [x] After first temperature pass with data: confirm `actual_temperature` + `temperature_delta` populated — **PASS** (35/36 closed trades)
 - [x] Check `no_coords` count in temp pass isn't unexpectedly high — **PASS** (all 12 traded city keys match `CITY_COORDS` exactly)
-
----
-
-## Canary Feature (keep separate from Railbird the user)
-
-Track a single designated sharp trader's rolling win rate as an early-warning signal that
-market efficiency is compressing (if their edge shrinks, ours may follow).
-
-- [ ] Add `canary_wallet` config key (null by default)
-- [ ] `weather_canary.py` — tracks the canary's rolling 20-trade win rate, surfaces trend
-- [ ] If canary win rate drops below 0.52 (rolling), log a warning in the bot dashboard
-- [ ] Dashboard panel: canary rolling win rate chart (separate from main trader ensemble)
-- [ ] Evaluate: should a deteriorating canary signal reduce our Kelly fraction?
+- [ ] Post-repair: verify new resolutions produce correct `forecast_correct` for NO-direction trades
 
 ---
 
@@ -56,7 +48,7 @@ market efficiency is compressing (if their edge shrinks, ours may follow).
 
 Size into winning positions rather than fixed-size single entries.
 
-- [ ] Design: entry at initial Kelly size; add-on triggers when ensemble conviction increases
+- [ ] Design: entry at initial Kelly size; add-on triggers when ensemble conviction increases (and its closer to time to close)
   (e.g. ens_pct crosses 0.80 with ≥20% price improvement since entry)
 - [ ] Max pyramid depth: 2 add-ons per market (3 legs total)
 - [ ] Each leg tracked as separate trade record in DB (or a `parent_trade_id` FK)
@@ -72,14 +64,15 @@ Size into winning positions rather than fixed-size single entries.
 - [ ] Kill switch — check for `STOP` file at top of each poll loop; exit cleanly if present
 - [ ] VaR(95%) display on dashboard — estimated max daily loss at current position sizes
 - [ ] Brier Score tracking — proper calibration metric alongside win rate
+- [ ] Close all button on the UI so user can exit the market immediately as needed
 
 ---
 
-## Model Accuracy Analysis (nearly unblocked)
+## Model Accuracy Analysis (unblocked — data is clean)
 
-At 27 resolved trades with `actual_temperature` populated as of 2026-04-06. Early signal now possible.
+At 35 resolved trades with `actual_temperature` populated as of 2026-04-07. True forecast accuracy: 73.5%. Calibration data is now trustworthy after inversion bug fix.
 
-- [ ] YES warm bias investigation — are YES bets underperforming because model is warm-biased, or because of entry timing at thin-market hours?
+- [x] YES warm bias investigation — **answered 2026-04-07:** YES underperformance is NOT warm bias. It's cheap-token adverse exits. 27% win rate on YES, but several correct forecasts (Seoul #76/#86, delta=+4.6C) killed by adverse exits on $0.09-$0.14 fills. Fixed by raising YES min_fill to $0.25.
 - [ ] Temperature delta histogram — distribution of |delta| at entry vs at resolution
 - [ ] Edge tier calibration — does STRONG (≥30%) actually outperform EDGE (15-30%)?
 - [ ] City-level accuracy report — which cities does the model forecast worst?
@@ -101,7 +94,6 @@ Consider whether the decision layer can auto-tune its own thresholds based on re
 
 ## Minor / Polish
 
-- [ ] Reverse-engineer Railbird's (user's wallet) apparent algorithm — what entry patterns show up in their trade history?
 - [ ] Dashboard: add "last discovery run" timestamp + trader count to a sidebar stat
 - [x] `trader_discovery.py` — weekly auto-run wired into calibration scheduler (daemon thread, non-blocking lock, timestamp written only on success)
 - [ ] Trader data review & cleanup — monthly review of `tracked_traders` to prune stale/low-quality wallets; consider a script that deactivates wallets inactive for >90 days or with n_resolved < threshold after sufficient data accumulates
