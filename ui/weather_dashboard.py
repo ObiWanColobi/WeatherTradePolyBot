@@ -404,9 +404,10 @@ if open_trades:
         )
     st.dataframe(df_open, column_config=col_cfg, width='stretch', hide_index=True)
 
-    # Per-trade close buttons
+    # Per-trade close buttons — horizontal layout, 4 per row
     st.caption("Manual close:")
-    for t in open_trades:
+    _btn_cols = st.columns(min(len(open_trades), 4))
+    for i, t in enumerate(open_trades):
         trade_id = t["id"]
         city = (t.get("city") or "?").title()
         direction = t.get("direction", "?").upper()
@@ -418,29 +419,28 @@ if open_trades:
         if time_key not in st.session_state:
             st.session_state[time_key] = None
 
-        if not st.session_state[state_key]:
-            if st.button(f"Close: {city} {direction}", key=f"btn_close_{trade_id}"):
-                st.session_state[state_key] = True
-                st.session_state[time_key] = time.time()
-                st.rerun()
-        else:
-            elapsed = time.time() - (st.session_state[time_key] or 0)
-            if elapsed > 10:
-                st.session_state[state_key] = False
-                st.rerun()
+        with _btn_cols[i % 4]:
+            if not st.session_state[state_key]:
+                if st.button(f"Close: {city} {direction}", key=f"btn_close_{trade_id}"):
+                    st.session_state[state_key] = True
+                    st.session_state[time_key] = time.time()
+                    st.rerun()
+            else:
+                elapsed = time.time() - (st.session_state[time_key] or 0)
+                if elapsed > 10:
+                    st.session_state[state_key] = False
+                    st.rerun()
 
-            c1, c2 = st.columns([1, 1])
-            with c1:
-                if st.button(f"✅ Confirm close {city} {direction}?", key=f"btn_confirm_{trade_id}", type="primary"):
+                st.warning(f"Close {city} {direction}?")
+                if st.button(f"✅ Confirm", key=f"btn_confirm_{trade_id}", type="primary"):
                     executor = PaperExecutor()
                     executor.close_full(t, reason="manual_close")
                     _risk_mgr.add_manual_close(t.get("market_id", ""))
                     print(f"[risk] manual close: {t.get('market_name', '')[:50]}")
                     st.session_state[state_key] = False
-                    st.success(f"Closed {city} {direction}.")
+                    st.success(f"Closed.")
                     time.sleep(1)
                     st.rerun()
-            with c2:
                 if st.button("❌ Cancel", key=f"btn_cancel_{trade_id}"):
                     st.session_state[state_key] = False
                     st.rerun()
