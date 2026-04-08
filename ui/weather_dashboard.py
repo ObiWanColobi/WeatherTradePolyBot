@@ -102,6 +102,8 @@ def _parse_threshold(row: dict) -> str:
     return "—"
 
 
+_risk_mgr = RiskManager()
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -222,7 +224,6 @@ with st.sidebar:
 cash          = db.get_balance() or PAPER_STARTING_BALANCE
 all_trades    = db.get_all_trades()
 open_trades   = [t for t in all_trades if t["status"] == "open"]
-_risk_mgr     = RiskManager()
 HISTORY_CUTOFF = "2026-04-02T20:52"
 closed_trades = [t for t in all_trades if t["status"] == "closed" and (t.get("opened_at") or "") > HISTORY_CUTOFF]
 stats         = db.get_stats()
