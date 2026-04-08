@@ -404,13 +404,15 @@ if open_trades:
         )
     st.dataframe(df_open, column_config=col_cfg, width='stretch', hide_index=True)
 
-    # Per-trade close buttons — horizontal layout, 4 per row
+    # Per-trade close buttons — horizontal row of buttons, confirmation below
     st.caption("Manual close:")
     _btn_cols = st.columns(min(len(open_trades), 4))
+    _pending_close = None  # track which trade (if any) is awaiting confirmation
     for i, t in enumerate(open_trades):
         trade_id = t["id"]
         city = (t.get("city") or "?").title()
         direction = t.get("direction", "?").upper()
+        threshold = _parse_threshold(t)
         state_key = f"confirm_close_{trade_id}"
         time_key = f"close_time_{trade_id}"
 
@@ -419,32 +421,43 @@ if open_trades:
         if time_key not in st.session_state:
             st.session_state[time_key] = None
 
-        threshold = _parse_threshold(t)
-        with _btn_cols[i % 4]:
-            if not st.session_state[state_key]:
-                if st.button(f"Close: {city} {direction} {threshold}", key=f"btn_close_{trade_id}"):
-                    st.session_state[state_key] = True
-                    st.session_state[time_key] = time.time()
-                    st.rerun()
-            else:
-                elapsed = time.time() - (st.session_state[time_key] or 0)
-                if elapsed > 10:
-                    st.session_state[state_key] = False
-                    st.rerun()
+        # Expire stale confirmations
+        if st.session_state[state_key]:
+            elapsed = time.time() - (st.session_state[time_key] or 0)
+            if elapsed > 10:
+                st.session_state[state_key] = False
 
-                st.warning(f"Close {city} {direction} {threshold}?")
-                if st.button(f"✅ Confirm", key=f"btn_confirm_{trade_id}", type="primary"):
-                    executor = PaperExecutor()
-                    executor.close_full(t, reason="manual_close")
-                    _risk_mgr.add_manual_close(t.get("market_id", ""))
-                    print(f"[risk] manual close: {t.get('market_name', '')[:50]}")
-                    st.session_state[state_key] = False
-                    st.success(f"Closed.")
-                    time.sleep(1)
-                    st.rerun()
-                if st.button("❌ Cancel", key=f"btn_cancel_{trade_id}"):
-                    st.session_state[state_key] = False
-                    st.rerun()
+        with _btn_cols[i % 4]:
+            label = f"Close: {city} {direction} {threshold}"
+            btn_type = "primary" if st.session_state[state_key] else "secondary"
+            if st.button(label, key=f"btn_close_{trade_id}", type=btn_type):
+                # Toggle: click again to cancel pending confirmation
+                st.session_state[state_key] = not st.session_state[state_key]
+                st.session_state[time_key] = time.time() if st.session_state[state_key] else None
+                st.rerun()
+
+        if st.session_state[state_key]:
+            _pending_close = (t, trade_id, city, direction, threshold, state_key)
+
+    # Confirmation UI — full width, below all buttons
+    if _pending_close:
+        t, trade_id, city, direction, threshold, state_key = _pending_close
+        st.warning(f"Confirm close: **{city} {direction} {threshold}**? (auto-cancels in 10s)")
+        c1, c2, _ = st.columns([1, 1, 6])
+        with c1:
+            if st.button("✅ Confirm", key=f"btn_confirm_{trade_id}", type="primary"):
+                executor = PaperExecutor()
+                executor.close_full(t, reason="manual_close")
+                _risk_mgr.add_manual_close(t.get("market_id", ""))
+                print(f"[risk] manual close: {t.get('market_name', '')[:50]}")
+                st.session_state[state_key] = False
+                st.success(f"Closed {city} {direction} {threshold}.")
+                time.sleep(1)
+                st.rerun()
+        with c2:
+            if st.button("❌ Cancel", key=f"btn_cancel_{trade_id}"):
+                st.session_state[state_key] = False
+                st.rerun()
 else:
     st.info("No open positions.")
 
