@@ -98,6 +98,16 @@ WEATHER = {
     "calibration_temp_pass_max_cities": 20,             # cap cities fetched per temperature pass (archive API burst control)
     "calibration_temp_pass_cooldown_after_429_minutes": 10,  # skip temp pass if any Open-Meteo 429 seen within N min
     "calibration_temp_pass_skip_if_ensemble_within_seconds": 60,  # skip temp pass if ensemble burst fired recently
+
+    # ── Risk management ──────────────────────────────────────────────────────
+    "risk_daily_loss_limit_pct":   0.15,    # 15% of account value — loose for paper, tighten for live
+    "risk_auto_reset":             True,    # True = paper (midnight UTC reset), False = live (restart or UI override to clear)
+    "risk_email_enabled":          False,   # opt-in email alerts
+    "risk_email_smtp_host":        "",      # e.g. "smtp.gmail.com"
+    "risk_email_smtp_port":        587,
+    "risk_email_from":             "",
+    "risk_email_to":               "",
+    "risk_email_password":         "",      # app password, not account password
 }
 
 # ── API Endpoints ─────────────────────────────────────────────────────────────
