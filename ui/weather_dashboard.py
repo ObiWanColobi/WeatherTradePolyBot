@@ -419,9 +419,10 @@ if open_trades:
         if time_key not in st.session_state:
             st.session_state[time_key] = None
 
+        threshold = _parse_threshold(t)
         with _btn_cols[i % 4]:
             if not st.session_state[state_key]:
-                if st.button(f"Close: {city} {direction}", key=f"btn_close_{trade_id}"):
+                if st.button(f"Close: {city} {direction} {threshold}", key=f"btn_close_{trade_id}"):
                     st.session_state[state_key] = True
                     st.session_state[time_key] = time.time()
                     st.rerun()
@@ -431,7 +432,7 @@ if open_trades:
                     st.session_state[state_key] = False
                     st.rerun()
 
-                st.warning(f"Close {city} {direction}?")
+                st.warning(f"Close {city} {direction} {threshold}?")
                 if st.button(f"✅ Confirm", key=f"btn_confirm_{trade_id}", type="primary"):
                     executor = PaperExecutor()
                     executor.close_full(t, reason="manual_close")
