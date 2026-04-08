@@ -11,6 +11,7 @@ All other panels auto-refresh every 30 seconds from the DB.
 import re
 import sys
 import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -644,28 +645,138 @@ if closed_trades:
             reason_groups.setdefault(r, []).append(t)
         st.dataframe(_win_rate_table(reason_groups), width='stretch', hide_index=True)
 
-    # P&L chart
+    # ── Analytics charts ─────────────────────────────────────────────────────
     if len(closed_trades) > 1:
-        st.markdown("**P&L per Trade**")
-        pnl_vals  = [t.get("pnl") or 0 for t in closed_trades]
-        trade_labels = [
-            f"{(t.get('city') or '?').title()} {_parse_threshold(t)} {t['direction']}"
-            for t in closed_trades
+
+        # Chart 1: P&L by City
+        st.markdown("**P&L by City**")
+        city_pnl: dict   = defaultdict(float)
+        city_count: dict = defaultdict(int)
+        for t in closed_trades:
+            city = (t.get("city") or "Unknown").title()
+            city_pnl[city]   += t.get("pnl") or 0
+            city_count[city] += 1
+        cities      = sorted(city_pnl.keys())
+        city_y      = [city_pnl[c] for c in cities]
+        city_colors = ["#00cc88" if v >= 0 else "#ff4444" for v in city_y]
+        city_hover  = [
+            f"{c}<br>Trades: {city_count[c]}<br>Net P&L: ${city_pnl[c]:.2f}"
+            for c in cities
         ]
-        colors = ["#00cc88" if v >= 0 else "#ff4444" for v in pnl_vals]
-        fig_pnl = go.Figure(go.Bar(
-            x=trade_labels, y=pnl_vals,
-            marker_color=colors,
-            hovertemplate="%{x}<br>P&L: $%{y:.2f}<extra></extra>",
+        fig_city = go.Figure(go.Bar(
+            x=cities, y=city_y,
+            marker_color=city_colors,
+            hovertext=city_hover, hoverinfo="text",
         ))
-        fig_pnl.update_layout(
+        fig_city.update_layout(
             height=240, margin=dict(l=0, r=0, t=10, b=0),
             yaxis_tickprefix="$",
             plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
             xaxis=dict(showgrid=False), yaxis=dict(gridcolor="rgba(255,255,255,0.08)"),
             showlegend=False,
         )
-        st.plotly_chart(fig_pnl, width='stretch')
+        st.plotly_chart(fig_city, width='stretch')
+
+        # Charts 2 & 3: Edge scatter | Direction P&L
+        col_scatter, col_dir = st.columns(2)
+
+        # Chart 2: Edge % vs P&L scatter
+        with col_scatter:
+            st.markdown("**Edge % vs P&L**")
+            edge_x    = [t.get("edge_score") or 0 for t in closed_trades]
+            pnl_y     = [t.get("pnl") or 0 for t in closed_trades]
+            sc_dirs   = [t.get("direction", "YES") for t in closed_trades]
+            sc_colors = ["#00cc88" if d == "YES" else "#ff9900" for d in sc_dirs]
+            sc_hover  = [
+                f"{(t.get('city') or '?').title()}<br>"
+                f"Direction: {t.get('direction')}<br>"
+                f"Edge: {t.get('edge_score') or 0:.1f}%<br>"
+                f"P&L: ${t.get('pnl') or 0:.2f}"
+                for t in closed_trades
+            ]
+            fig_scatter = go.Figure(go.Scatter(
+                x=edge_x, y=pnl_y,
+                mode="markers",
+                marker=dict(color=sc_colors, size=9, opacity=0.85),
+                hovertext=sc_hover, hoverinfo="text",
+            ))
+            fig_scatter.add_hline(y=0, line_dash="dash", line_color="gray", line_width=1)
+            fig_scatter.update_layout(
+                height=260, margin=dict(l=0, r=0, t=10, b=0),
+                xaxis_title="Edge %", yaxis_tickprefix="$",
+                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                xaxis=dict(gridcolor="rgba(255,255,255,0.08)"),
+                yaxis=dict(gridcolor="rgba(255,255,255,0.08)"),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_scatter, width='stretch')
+
+        # Chart 3: Net P&L by Direction
+        with col_dir:
+            st.markdown("**Net P&L by Direction**")
+            yes_trades = [t for t in closed_trades if t.get("direction") == "YES"]
+            no_trades  = [t for t in closed_trades if t.get("direction") == "NO"]
+            yes_pnl    = sum(t.get("pnl") or 0 for t in yes_trades)
+            no_pnl     = sum(t.get("pnl") or 0 for t in no_trades)
+            yes_wins   = sum(1 for t in yes_trades if (t.get("pnl") or 0) > 0)
+            no_wins    = sum(1 for t in no_trades  if (t.get("pnl") or 0) > 0)
+            dir_hover  = [
+                f"YES<br>Trades: {len(yes_trades)}<br>Net P&L: ${yes_pnl:.2f}"
+                + (f"<br>Win Rate: {yes_wins/len(yes_trades)*100:.0f}%" if yes_trades else ""),
+                f"NO<br>Trades: {len(no_trades)}<br>Net P&L: ${no_pnl:.2f}"
+                + (f"<br>Win Rate: {no_wins/len(no_trades)*100:.0f}%" if no_trades else ""),
+            ]
+            fig_dir = go.Figure(go.Bar(
+                x=["YES", "NO"], y=[yes_pnl, no_pnl],
+                marker_color=[
+                    "#00cc88" if yes_pnl >= 0 else "#ff4444",
+                    "#00cc88" if no_pnl  >= 0 else "#ff4444",
+                ],
+                hovertext=dir_hover, hoverinfo="text",
+            ))
+            fig_dir.update_layout(
+                height=260, margin=dict(l=0, r=0, t=10, b=0),
+                yaxis_tickprefix="$",
+                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                xaxis=dict(showgrid=False), yaxis=dict(gridcolor="rgba(255,255,255,0.08)"),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_dir, width='stretch')
+
+        # Chart 4: Rolling Win Rate (last 10 trades)
+        if len(closed_trades) >= 3:
+            st.markdown("**Rolling Win Rate (last 10 trades)**")
+            WINDOW     = 10
+            sorted_ct  = sorted(closed_trades, key=lambda t: t.get("closed_at") or "")
+            rolling_wr = []
+            for i in range(len(sorted_ct)):
+                window = sorted_ct[max(0, i - WINDOW + 1): i + 1]
+                wins   = sum(1 for t in window if (t.get("pnl") or 0) > 0)
+                rolling_wr.append(wins / len(window) * 100)
+            trade_nums = list(range(1, len(sorted_ct) + 1))
+            fig_roll = go.Figure()
+            fig_roll.add_trace(go.Scatter(
+                x=trade_nums, y=rolling_wr,
+                mode="lines+markers",
+                line=dict(color="#00cc88", width=2),
+                marker=dict(size=5),
+                hovertemplate="Trade #%{x}<br>Rolling Win Rate: %{y:.0f}%<extra></extra>",
+            ))
+            fig_roll.add_hline(
+                y=50, line_dash="dash", line_color="gray", line_width=1,
+                annotation_text="50%", annotation_position="right",
+            )
+            fig_roll.update_layout(
+                height=220, margin=dict(l=0, r=0, t=10, b=0),
+                yaxis=dict(
+                    ticksuffix="%", range=[0, 100],
+                    gridcolor="rgba(255,255,255,0.08)",
+                ),
+                xaxis=dict(title="Trade #", showgrid=False),
+                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                showlegend=False,
+            )
+            st.plotly_chart(fig_roll, width='stretch')
 
 else:
     st.info("No closed trades yet — P&L breakdown will appear here after first resolution.")
