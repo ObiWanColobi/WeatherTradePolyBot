@@ -38,7 +38,8 @@ _MAX_SPREAD_CENTS        = WEATHER.get("entry_max_spread_cents",        0.10)
 _MIN_HOURS_TO_CLOSE      = WEATHER.get("entry_min_hours_to_close",      2.0)
 _MIN_FILL_PRICE          = WEATHER.get("entry_min_fill_price",          0.15)
 _MIN_FILL_PRICE_YES      = WEATHER.get("entry_min_fill_price_yes",      0.25)
-_MIN_ENSEMBLE_MARGIN_C   = WEATHER.get("entry_min_ensemble_margin_c",   2.0)
+_MIN_ENSEMBLE_MARGIN_C       = WEATHER.get("entry_min_ensemble_margin_c",       2.0)
+_MIN_ENSEMBLE_MARGIN_FLOOR   = WEATHER.get("entry_min_ensemble_margin_c_floor", 1.5)
 
 
 @dataclass
@@ -87,20 +88,25 @@ def check_entry(market: dict, scan_data: dict, direction: str | None = None) -> 
         return EntryDecision(ok=False, reason="ensemble conviction too low", checks=checks)
 
     # ── 1b. Ensemble margin (coin-flip filter) ────────────────────────────────
-    # Even with 70%+ conviction, if the ensemble median is within 2°C of the
-    # threshold the outcome is too close to call — small measurement differences
-    # between Open-Meteo and Polymarket's oracle can flip the result.
+    # If the ensemble median is too close to the threshold, small measurement
+    # differences between Open-Meteo and Polymarket's oracle can flip the result.
+    # The required margin scales with conviction: unanimous ensembles (0/69 or
+    # 69/69) get the floor (1.5°C); borderline-passing conviction (70%) gets
+    # the full ceiling (3.0°C). This lets genuinely lopsided ensembles through
+    # without relaxing the guard for ambiguous ones.
     ens_margin = scan_data.get("ensemble_margin_c")
     if ens_margin is not None and _MIN_ENSEMBLE_MARGIN_C > 0:
+        scale = (conviction - 1.0) / (_MIN_ENSEMBLE_CONVICTION - 1.0)   # 0 at unanimous → 1 at min conviction
+        required_margin = _MIN_ENSEMBLE_MARGIN_FLOOR + (_MIN_ENSEMBLE_MARGIN_C - _MIN_ENSEMBLE_MARGIN_FLOOR) * scale
         checks["ensemble_margin"] = {
-            "ok":    abs(ens_margin) >= _MIN_ENSEMBLE_MARGIN_C,
+            "ok":    abs(ens_margin) >= required_margin,
             "value": f"{ens_margin:+.1f}°C",
-            "need":  f">={_MIN_ENSEMBLE_MARGIN_C:.1f}°C from threshold",
+            "need":  f">={required_margin:.1f}°C from threshold (conviction-scaled)",
         }
         if not checks["ensemble_margin"]["ok"]:
             return EntryDecision(
                 ok=False,
-                reason=f"ensemble margin {ens_margin:+.1f}°C too close to threshold (need >={_MIN_ENSEMBLE_MARGIN_C:.1f}°C)",
+                reason=f"ensemble margin {ens_margin:+.1f}°C too close to threshold (need >={required_margin:.1f}°C at {conviction:.0%} conviction)",
                 checks=checks,
             )
 

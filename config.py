@@ -66,7 +66,8 @@ WEATHER = {
     "entry_min_fill_price_yes":      0.25,  # higher floor for YES tokens — cheap YES bets get killed by adverse exits
     "entry_max_spread_cents":        0.08,  # max bid/ask spread ($0.08)
     "entry_min_hours_to_close":      2.0,   # must have >=2h before resolution
-    "entry_min_ensemble_margin_c":   3.0,   # ensemble mean must be >=3°C from threshold (filters coin-flip zone; raised from 2.0 on 2026-04-07)
+    "entry_min_ensemble_margin_c":       3.0,   # ensemble mean must be >=3°C from threshold at minimum conviction (raised from 2.0 on 2026-04-07)
+    "entry_min_ensemble_margin_c_floor": 1.5,   # margin floor for unanimous ensembles (0/69 or 69/69); scales linearly up to entry_min_ensemble_margin_c at min conviction
     "entry_max_slippage_pct":        0.05,  # max simulated fill slippage as % of mid (5%)
 
     # ── Decision layer ────────────────────────────────────────────────────────
