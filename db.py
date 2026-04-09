@@ -186,6 +186,8 @@ def init_db():
         _safe_add_column(conn, "trades", "hours_to_close_at_entry", "REAL")     # hours until market close at time of entry
         _safe_add_column(conn, "trades", "hours_to_close_at_exit",  "REAL")     # hours until market close at time of exit
         _safe_add_column(conn, "trades", "resolution_attempts",     "INTEGER")  # no_data/404 hit count; stop retrying at threshold
+        _safe_add_column(conn, "trades", "parent_trade_id",  "INTEGER")
+        _safe_add_column(conn, "trades", "leg_number",       "INTEGER DEFAULT 1")
 
         # Backfill hours_to_close for trades that predate this column
         conn.executescript("""
@@ -386,6 +388,49 @@ def get_open_market_ids() -> set[str]:
             "SELECT market_id FROM trades WHERE status = 'open'"
         ).fetchall()
     return {r["market_id"] for r in rows if r["market_id"]}
+
+
+def get_position_legs(parent_id: int) -> list[dict]:
+    """Return all legs of an extended position (parent + children), ordered by leg_number."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM trades WHERE (id = ? OR parent_trade_id = ?) AND status = 'open' "
+            "ORDER BY leg_number",
+            (parent_id, parent_id),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_leg_count(parent_id: int) -> int:
+    """Count open legs for an extended position (parent + children)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM trades WHERE (id = ? OR parent_trade_id = ?) AND status = 'open'",
+            (parent_id, parent_id),
+        ).fetchone()
+        return row[0] if row else 0
+
+
+def get_latest_leg(parent_id: int) -> dict | None:
+    """Return the most recently opened leg of an extended position."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM trades WHERE (id = ? OR parent_trade_id = ?) AND status = 'open' "
+            "ORDER BY opened_at DESC LIMIT 1",
+            (parent_id, parent_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_all_position_legs(parent_id: int) -> list[dict]:
+    """Return all legs of a position regardless of status, ordered by leg_number."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM trades WHERE (id = ? OR parent_trade_id = ?) "
+            "ORDER BY leg_number",
+            (parent_id, parent_id),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def get_open_city_date_counts() -> dict[tuple[str, str], int]:
