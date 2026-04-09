@@ -109,6 +109,12 @@ WEATHER = {
     "risk_email_from":             "",
     "risk_email_to":               "",
     "risk_email_password":         "",      # app password, not account password
+
+    # ── Extended positions (scale-in) ─────────────────────────────────────────
+    "extended_positions_enabled":          True,    # master toggle — False skips pass entirely
+    "extended_positions_max_add_ons":      2,       # max add-on legs (3 total with initial entry)
+    "extended_positions_leg_spacing_hours": 12.0,   # time-to-close band spacing per leg
+    "extended_positions_min_cooldown_hours": 12.0,  # minimum hours between any two legs
 }
 
 # ── API Endpoints ─────────────────────────────────────────────────────────────
