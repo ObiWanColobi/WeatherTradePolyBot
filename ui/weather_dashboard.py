@@ -349,17 +349,58 @@ st.divider()
 st.subheader(f"Open Positions ({len(open_trades)})")
 
 if open_trades:
-    rows = []
+    # Group extended positions: parents with aggregated legs, standalone unchanged
+    _op_parent_map = {}   # parent_id → list of child legs
+    _op_standalone = []
+    _op_child_ids = {t["id"] for t in open_trades if t.get("parent_trade_id") is not None}
+    _op_parent_ids = {t.get("parent_trade_id") for t in open_trades if t.get("parent_trade_id") is not None}
+
     for t in open_trades:
+        pid = t.get("parent_trade_id")
+        if pid is not None:
+            _op_parent_map.setdefault(pid, []).append(t)
+        elif t["id"] in _op_parent_ids:
+            _op_parent_map.setdefault(t["id"], [])
+        else:
+            _op_standalone.append(t)
+
+    # Build display list: standalone trades + parent aggregates
+    _op_display = list(_op_standalone)
+    _op_aggregates = {}  # parent_id → aggregate dict
+
+    for pid, children in _op_parent_map.items():
+        parent = next((t for t in open_trades if t["id"] == pid), None)
+        if parent is None:
+            continue
+        all_legs = [parent] + children
+        total_size = sum(l["size_usdc"] for l in all_legs)
+        total_shares = sum(l.get("shares", 0) for l in all_legs)
+        weighted_fill = sum(l["fill_price"] * l["size_usdc"] for l in all_legs) / total_size if total_size else 0
+        total_unreal = sum(_unreal_pnl(l) for l in all_legs)
+        leg_count = len(all_legs)
+        max_legs = WEATHER.get("extended_positions_max_add_ons", 2) + 1
+
+        agg = dict(parent)
+        agg["size_usdc"] = total_size
+        agg["shares"] = total_shares
+        agg["fill_price"] = weighted_fill
+        agg["_unreal_override"] = total_unreal
+        agg["_leg_display"] = f"{leg_count}/{max_legs} legs"
+        agg["_legs"] = all_legs
+        _op_display.append(agg)
+        _op_aggregates[pid] = agg
+
+    rows = []
+    for t in _op_display:
         h = _hours_left(t.get("end_date", ""))
-        unreal = _unreal_pnl(t)
+        unreal = t.get("_unreal_override", _unreal_pnl(t))
         ens_yes = t.get("entry_ensemble_yes")
         ens_n   = t.get("entry_ensemble_n")
         ens_pct = t.get("entry_ensemble_pct")
         if ens_yes is not None and ens_n:
             ens_str = f"{int(ens_yes)}/{int(ens_n)}"
         elif ens_pct is not None:
-            ens_str = f"{ens_pct:.0%}"   # fallback for old trades without raw counts
+            ens_str = f"{ens_pct:.0%}"
         else:
             ens_str = "—"
         url = t.get("market_url") or ""
@@ -371,6 +412,7 @@ if open_trades:
             "City":         (t.get("city") or "—").title(),
             "Threshold":    _parse_threshold(t),
             "Bet":          t["direction"].title(),
+            "Legs":         t.get("_leg_display", "—"),
             "Tier":         _edge_tier(t.get("edge_score")),
             "Edge %":       round((t.get("edge_score") or 0), 1),
             "Model %":      round((t.get("estimated_prob") or 0) * 100, 1),
@@ -405,11 +447,31 @@ if open_trades:
         )
     st.dataframe(df_open, column_config=col_cfg, width='stretch', hide_index=True)
 
+    # Leg detail expanders for extended positions
+    for pid, agg in _op_aggregates.items():
+        legs = agg["_legs"]
+        city = (agg.get("city") or "?").title()
+        direction = agg.get("direction", "?").upper()
+        with st.expander(f"{city} {direction} — {len(legs)} legs"):
+            leg_rows = []
+            for leg in sorted(legs, key=lambda l: l.get("leg_number") or 1):
+                leg_rows.append({
+                    "Leg":       leg.get("leg_number") or 1,
+                    "Fill":      round(leg["fill_price"], 3),
+                    "Size $":    round(leg["size_usdc"], 2),
+                    "Shares":    round(leg.get("shares", 0), 2),
+                    "Ens Entry": f"{int(leg.get('entry_ensemble_yes', 0))}/{leg.get('entry_ensemble_n', 0)}"
+                                 if leg.get("entry_ensemble_n") else "—",
+                    "P&L $":     round(_unreal_pnl(leg), 2),
+                    "Opened":    (leg.get("opened_at") or "")[:16],
+                })
+            st.dataframe(pd.DataFrame(leg_rows), hide_index=True, width='stretch')
+
     # Per-trade close buttons — horizontal row of buttons, confirmation below
     st.caption("Manual close:")
-    _btn_cols = st.columns(min(len(open_trades), 4))
-    _pending_close = None  # track which trade (if any) is awaiting confirmation
-    for i, t in enumerate(open_trades):
+    _btn_cols = st.columns(min(len(_op_display), 4))
+    _pending_close = None
+    for i, t in enumerate(_op_display):
         trade_id = t["id"]
         city = (t.get("city") or "?").title()
         direction = t.get("direction", "?").upper()
@@ -422,17 +484,16 @@ if open_trades:
         if time_key not in st.session_state:
             st.session_state[time_key] = None
 
-        # Expire stale confirmations
         if st.session_state[state_key]:
             elapsed = time.time() - (st.session_state[time_key] or 0)
             if elapsed > 10:
                 st.session_state[state_key] = False
 
         with _btn_cols[i % 4]:
-            label = f"Close: {city} {direction} {threshold}"
+            n_legs = len(t["_legs"]) if t.get("_legs") else 0
+            label = f"Close: {city} {direction} {threshold}" + (f" ({n_legs} legs)" if n_legs > 1 else "")
             btn_type = "primary" if st.session_state[state_key] else "secondary"
             if st.button(label, key=f"btn_close_{trade_id}", type=btn_type):
-                # Toggle: click again to cancel pending confirmation
                 st.session_state[state_key] = not st.session_state[state_key]
                 st.session_state[time_key] = time.time() if st.session_state[state_key] else None
                 st.rerun()
@@ -440,15 +501,22 @@ if open_trades:
         if st.session_state[state_key]:
             _pending_close = (t, trade_id, city, direction, threshold, state_key)
 
-    # Confirmation UI — full width, below all buttons
     if _pending_close:
         t, trade_id, city, direction, threshold, state_key = _pending_close
-        st.warning(f"Confirm close: **{city} {direction} {threshold}**? (auto-cancels in 10s)")
+        n_legs = len(t["_legs"]) if t.get("_legs") else 0
+        close_msg = f"Confirm close: **{city} {direction} {threshold}**"
+        if n_legs > 1:
+            close_msg += f" (all {n_legs} legs)"
+        close_msg += "? (auto-cancels in 10s)"
+        st.warning(close_msg)
         c1, c2, _ = st.columns([1, 1, 6])
         with c1:
             if st.button("✅ Confirm", key=f"btn_confirm_{trade_id}", type="primary"):
                 executor = PaperExecutor()
-                executor.close_full(t, reason="manual_close")
+                if t.get("_legs"):
+                    executor.close_position(t, reason="manual_close")
+                else:
+                    executor.close_full(t, reason="manual_close")
                 _risk_mgr.add_manual_close(t.get("market_id", ""))
                 print(f"[risk] manual close: {t.get('market_name', '')[:50]}")
                 st.session_state[state_key] = False
@@ -537,8 +605,48 @@ st.divider()
 st.subheader(f"Trade History ({len(closed_trades)} closed)")
 
 if closed_trades:
-    rows = []
+    # Group extended positions in closed trades
+    _cl_parent_map = {}
+    _cl_standalone = []
+    _cl_parent_ids = {t.get("parent_trade_id") for t in closed_trades if t.get("parent_trade_id") is not None}
+
     for t in closed_trades:
+        pid = t.get("parent_trade_id")
+        if pid is not None:
+            _cl_parent_map.setdefault(pid, []).append(t)
+        elif t["id"] in _cl_parent_ids:
+            _cl_parent_map.setdefault(t["id"], [])
+        else:
+            _cl_standalone.append(t)
+
+    _cl_display = list(_cl_standalone)
+    _cl_aggregates = {}
+
+    for pid, children in _cl_parent_map.items():
+        parent = next((t for t in closed_trades if t["id"] == pid), None)
+        if parent is None:
+            continue
+        all_legs = [parent] + children
+        total_size = sum(l["size_usdc"] for l in all_legs)
+        total_pnl = sum(l.get("pnl") or 0 for l in all_legs)
+        weighted_fill = sum(l["fill_price"] * l["size_usdc"] for l in all_legs) / total_size if total_size else 0
+        exit_prices = [l.get("exit_price") for l in all_legs if l.get("exit_price") is not None]
+        weighted_exit = sum((l.get("exit_price") or 0) * l["size_usdc"] for l in all_legs) / total_size if total_size and exit_prices else 0
+        leg_count = len(all_legs)
+
+        agg = dict(parent)
+        agg["size_usdc"] = total_size
+        agg["fill_price"] = weighted_fill
+        agg["exit_price"] = weighted_exit
+        agg["pnl"] = total_pnl
+        agg["pnl_pct"] = (total_pnl / total_size * 100) if total_size else 0
+        agg["_leg_display"] = f"{leg_count} legs"
+        agg["_legs"] = all_legs
+        _cl_display.append(agg)
+        _cl_aggregates[pid] = agg
+
+    rows = []
+    for t in _cl_display:
         url = t.get("market_url") or ""
         ens_yes = t.get("entry_ensemble_yes")
         ens_n   = t.get("entry_ensemble_n")
@@ -553,6 +661,7 @@ if closed_trades:
             "City":         (t.get("city") or "—").title(),
             "Threshold":    _parse_threshold(t),
             "Bet":          t["direction"].title(),
+            "Legs":         t.get("_leg_display", "—"),
             "Tier":         _edge_tier(t.get("edge_score")),
             "Edge %":       round(t.get("edge_score") or 0, 1),
             "Model %":      round((t.get("estimated_prob") or 0) * 100, 1),
@@ -588,6 +697,25 @@ if closed_trades:
             "Market", display_text=r"https://polymarket\.com/event/([^/]+)",
         )
     st.dataframe(df_closed, column_config=closed_col_cfg, width='stretch', hide_index=True)
+
+    # Leg detail expanders for closed extended positions
+    for pid, agg in _cl_aggregates.items():
+        legs = agg["_legs"]
+        city = (agg.get("city") or "?").title()
+        direction = agg.get("direction", "?").upper()
+        with st.expander(f"{city} {direction} — {len(legs)} legs"):
+            leg_rows = []
+            for leg in sorted(legs, key=lambda l: l.get("leg_number") or 1):
+                leg_rows.append({
+                    "Leg":    leg.get("leg_number") or 1,
+                    "Fill":   round(leg["fill_price"], 3),
+                    "Exit":   round(leg.get("exit_price") or 0, 3),
+                    "Size $": round(leg["size_usdc"], 2),
+                    "P&L $":  round(leg.get("pnl") or 0, 2),
+                    "Opened": (leg.get("opened_at") or "")[:16],
+                    "Closed": (leg.get("closed_at") or "")[:16],
+                })
+            st.dataframe(pd.DataFrame(leg_rows), hide_index=True)
 
     st.divider()
 
