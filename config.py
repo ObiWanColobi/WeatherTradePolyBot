@@ -72,7 +72,7 @@ WEATHER = {
 
     # ── Decision layer ────────────────────────────────────────────────────────
     "decision_max_open_positions":        20,   # max concurrent open trades (increase freely)
-    "decision_max_exposure_pct":          .9,   # max total balance % at risk across all open trades
+    "decision_max_exposure_pct":          0.9,   # max total balance % at risk across all open trades
     "decision_max_positions_per_city_date": 2,  # max positions per (city, resolution-date) — allows different thresholds, caps concentration
 
     # ── Trader ensemble (social signal) ──────────────────────────────────────
@@ -115,6 +115,8 @@ WEATHER = {
     "extended_positions_max_add_ons":      2,       # max add-on legs (3 total with initial entry)
     "extended_positions_leg_spacing_hours": 12.0,   # time-to-close band spacing per leg
     "extended_positions_min_cooldown_hours": 12.0,  # minimum hours between any two legs
+    "extended_positions_rejection_cooldown_hours": 1.0,  # cooldown after a rejected extend attempt (slippage/thin book)
+    "extended_positions_min_net_edge":     0.03,  # minimum edge after slippage cost to bother extending (3%)
 }
 
 # ── API Endpoints ─────────────────────────────────────────────────────────────

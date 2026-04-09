@@ -408,7 +408,9 @@ if open_trades:
         cur_n   = t.get("current_ensemble_n")
         cur_ens_str = f"{int(cur_yes)}/{int(cur_n)}" if cur_yes is not None and cur_n else "—"
 
-        rows.append({
+        # _pid used to match parent rows to their leg sub-rows; dropped before display
+        row = {
+            "_pid":          t["id"] if t["id"] in _op_aggregates else None,
             "City":         (t.get("city") or "—").title(),
             "Threshold":    _parse_threshold(t),
             "Bet":          t["direction"].title(),
@@ -429,9 +431,45 @@ if open_trades:
             "Closes":       _fmt_hours(h),
             "Market":       url or t.get("market_name", ""),
             "Opened":       (t.get("opened_at") or "")[:16],
-        })
+        }
+        rows.append(row)
 
-    df_open = pd.DataFrame(rows)
+    # Insert leg sub-rows inline beneath their parent
+    expanded_rows = []
+    for r in rows:
+        expanded_rows.append(r)
+        pid = r.get("_pid")
+        if pid and pid in _op_aggregates:
+            for leg in sorted(_op_aggregates[pid]["_legs"], key=lambda l: l.get("leg_number") or 1):
+                num = leg.get("leg_number") or 1
+                label = "Entry" if num == 1 else f"Leg {num - 1}"
+                leg_unreal = _unreal_pnl(leg)
+                expanded_rows.append({
+                    "_pid":         None,
+                    "City":         f"  ↳ {label}",
+                    "Threshold":    "",
+                    "Bet":          "",
+                    "Legs":         "",
+                    "Tier":         _edge_tier(leg.get("edge_score")),
+                    "Edge %":       round(leg.get("edge_score") or 0, 1),
+                    "Model %":      round((leg.get("estimated_prob") or 0) * 100, 1),
+                    "Mkt %":        round((leg.get("entry_price") or 0) * 100, 1),
+                    "Ens. Entry":   f"{int(leg.get('entry_ensemble_yes', 0))}/{leg.get('entry_ensemble_n', 0)}"
+                                    if leg.get("entry_ensemble_n") else "—",
+                    "Ens. Current": "",
+                    "Tr Ens":       "",
+                    "Fill":         round(leg["fill_price"], 3),
+                    "Current":      round(leg.get("current_price") or leg["fill_price"], 3),
+                    "Unreal. P&L":  round(leg_unreal, 2),
+                    "Unreal. P&L %": round((leg_unreal / leg["size_usdc"]) * 100, 1) if leg["size_usdc"] else None,
+                    "Size $":       round(leg["size_usdc"], 2),
+                    "Vol 24h":      round(leg["volume_24h"]) if leg.get("volume_24h") else None,
+                    "Closes":       _fmt_hours(_hours_left(leg.get("end_date", ""))),
+                    "Market":       "",
+                    "Opened":       (leg.get("opened_at") or "")[:16],
+                })
+
+    df_open = pd.DataFrame(expanded_rows).drop(columns=["_pid"])
     col_cfg = {
         "Edge %":      st.column_config.NumberColumn(format="%.1f%%"),
         "Model %":     st.column_config.NumberColumn(format="%.1f%%"),
@@ -441,31 +479,11 @@ if open_trades:
         "Unreal. P&L %": st.column_config.NumberColumn(format="%.1f%%"),
         "Vol 24h":       st.column_config.NumberColumn(format="$%d"),
     }
-    if any(r["Market"].startswith("http") for r in rows):
+    if any(r["Market"].startswith("http") for r in expanded_rows if r["Market"]):
         col_cfg["Market"] = st.column_config.LinkColumn(
             "Market", display_text=r"https://polymarket\.com/event/([^/]+)",
         )
     st.dataframe(df_open, column_config=col_cfg, width='stretch', hide_index=True)
-
-    # Leg detail expanders for extended positions
-    for pid, agg in _op_aggregates.items():
-        legs = agg["_legs"]
-        city = (agg.get("city") or "?").title()
-        direction = agg.get("direction", "?").upper()
-        with st.expander(f"{city} {direction} — {len(legs)} legs"):
-            leg_rows = []
-            for leg in sorted(legs, key=lambda l: l.get("leg_number") or 1):
-                leg_rows.append({
-                    "Leg":       leg.get("leg_number") or 1,
-                    "Fill":      round(leg["fill_price"], 3),
-                    "Size $":    round(leg["size_usdc"], 2),
-                    "Shares":    round(leg.get("shares", 0), 2),
-                    "Ens Entry": f"{int(leg.get('entry_ensemble_yes', 0))}/{leg.get('entry_ensemble_n', 0)}"
-                                 if leg.get("entry_ensemble_n") else "—",
-                    "P&L $":     round(_unreal_pnl(leg), 2),
-                    "Opened":    (leg.get("opened_at") or "")[:16],
-                })
-            st.dataframe(pd.DataFrame(leg_rows), hide_index=True, width='stretch')
 
     # Per-trade close buttons — horizontal row of buttons, confirmation below
     st.caption("Manual close:")
@@ -658,6 +676,7 @@ if closed_trades:
         else:
             ens_str = "—"
         rows.append({
+            "_pid":         t["id"] if t["id"] in _cl_aggregates else None,
             "City":         (t.get("city") or "—").title(),
             "Threshold":    _parse_threshold(t),
             "Bet":          t["direction"].title(),
@@ -667,6 +686,8 @@ if closed_trades:
             "Model %":      round((t.get("estimated_prob") or 0) * 100, 1),
             "Mkt %":        round((t.get("entry_price") or 0) * 100, 1),
             "Ens. Entry":   ens_str,
+            "Ens. Exit":    f"{int(t['current_ensemble_yes'])}/{int(t['current_ensemble_n'])}"
+                            if t.get("current_ensemble_yes") is not None and t.get("current_ensemble_n") else "—",
             "Tr Ens":       _tr_ens(t.get("market_id", ""), t.get("direction", "")),
             "Fill":         round(t["fill_price"], 3),
             "Exit":         round(t.get("exit_price") or 0, 3),
@@ -682,7 +703,45 @@ if closed_trades:
             "Closed":       (t.get("closed_at") or "")[:16],
         })
 
-    df_closed = pd.DataFrame(rows)
+    # Insert leg sub-rows inline beneath their parent
+    expanded_rows = []
+    for r in rows:
+        expanded_rows.append(r)
+        pid = r.get("_pid")
+        if pid and pid in _cl_aggregates:
+            for leg in sorted(_cl_aggregates[pid]["_legs"], key=lambda l: l.get("leg_number") or 1):
+                num = leg.get("leg_number") or 1
+                label = "Entry" if num == 1 else f"Leg {num - 1}"
+                expanded_rows.append({
+                    "_pid":         None,
+                    "City":         f"  ↳ {label}",
+                    "Threshold":    "",
+                    "Bet":          "",
+                    "Legs":         "",
+                    "Tier":         _edge_tier(leg.get("edge_score")),
+                    "Edge %":       round(leg.get("edge_score") or 0, 1),
+                    "Model %":      round((leg.get("estimated_prob") or 0) * 100, 1),
+                    "Mkt %":        round((leg.get("entry_price") or 0) * 100, 1),
+                    "Ens. Entry":   f"{int(leg.get('entry_ensemble_yes', 0))}/{leg.get('entry_ensemble_n', 0)}"
+                                    if leg.get("entry_ensemble_n") else "—",
+                    "Ens. Exit":    f"{int(leg['current_ensemble_yes'])}/{int(leg['current_ensemble_n'])}"
+                                    if leg.get("current_ensemble_yes") is not None and leg.get("current_ensemble_n") else "—",
+                    "Tr Ens":       "",
+                    "Fill":         round(leg["fill_price"], 3),
+                    "Exit":         round(leg.get("exit_price") or 0, 3),
+                    "P&L $":        round(leg.get("pnl") or 0, 2),
+                    "P&L %":        round((leg.get("pnl") or 0) / leg["size_usdc"] * 100, 1) if leg["size_usdc"] else None,
+                    "Size $":       round(leg["size_usdc"], 2),
+                    "Hrs @ Entry":  _fmt_hours(leg.get("hours_to_close_at_entry")),
+                    "Hrs @ Exit":   _fmt_hours(leg.get("hours_to_close_at_exit")),
+                    "Vol 24h":      round(leg["volume_24h"]) if leg.get("volume_24h") else None,
+                    "Exit Reason":  (leg.get("exit_reason") or "")[:40],
+                    "Market":       "",
+                    "Opened":       (leg.get("opened_at") or "")[:16],
+                    "Closed":       (leg.get("closed_at") or "")[:16],
+                })
+
+    df_closed = pd.DataFrame(expanded_rows).drop(columns=["_pid"])
     closed_col_cfg = {
         "Edge %":  st.column_config.NumberColumn(format="%.1f%%"),
         "Model %": st.column_config.NumberColumn(format="%.1f%%"),
@@ -692,30 +751,11 @@ if closed_trades:
         "Size $":  st.column_config.NumberColumn(format="$%.2f"),
         "Vol 24h": st.column_config.NumberColumn(format="$%d"),
     }
-    if any(r["Market"].startswith("http") for r in rows):
+    if any(r["Market"].startswith("http") for r in expanded_rows if r["Market"]):
         closed_col_cfg["Market"] = st.column_config.LinkColumn(
             "Market", display_text=r"https://polymarket\.com/event/([^/]+)",
         )
     st.dataframe(df_closed, column_config=closed_col_cfg, width='stretch', hide_index=True)
-
-    # Leg detail expanders for closed extended positions
-    for pid, agg in _cl_aggregates.items():
-        legs = agg["_legs"]
-        city = (agg.get("city") or "?").title()
-        direction = agg.get("direction", "?").upper()
-        with st.expander(f"{city} {direction} — {len(legs)} legs"):
-            leg_rows = []
-            for leg in sorted(legs, key=lambda l: l.get("leg_number") or 1):
-                leg_rows.append({
-                    "Leg":    leg.get("leg_number") or 1,
-                    "Fill":   round(leg["fill_price"], 3),
-                    "Exit":   round(leg.get("exit_price") or 0, 3),
-                    "Size $": round(leg["size_usdc"], 2),
-                    "P&L $":  round(leg.get("pnl") or 0, 2),
-                    "Opened": (leg.get("opened_at") or "")[:16],
-                    "Closed": (leg.get("closed_at") or "")[:16],
-                })
-            st.dataframe(pd.DataFrame(leg_rows), hide_index=True)
 
     st.divider()
 

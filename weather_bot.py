@@ -120,6 +120,15 @@ def run_exit_pass():
             parent_id = trade.get("parent_trade_id") or trade["id"]
             legs = db.get_position_legs(parent_id)
             n_legs = len(legs)
+            # Propagate the freshly-fetched ensemble to all legs so every
+            # leg records the same exit ensemble (they close simultaneously)
+            if ens_yes is not None and ens_n is not None and n_legs > 1:
+                for leg in legs:
+                    if leg["id"] != trade["id"]:
+                        db.update_trade(leg["id"], {
+                            "current_ensemble_yes": ens_yes,
+                            "current_ensemble_n":   ens_n,
+                        })
             leg_suffix = f" (closing all {n_legs} legs)" if n_legs > 1 else ""
             print(
                 f"  [exit] {_pos_line}  -- {sig.reason}{leg_suffix}"
@@ -262,13 +271,13 @@ def run_extended_positions_pass(dry_run: bool = False):
 
         ens_yes = scan_data.get("yes_ensemble")
         ens_n   = scan_data.get("ensemble_n")
-        model_prob = scan_data.get("prob")
+        model_prob = scan_data.get("probability") or scan_data.get("prob") or 0
         market_price = trade.get("entry_price") or 0.5
 
         try:
             import markets.polymarket as _pm
             market_info = _pm.get_market_by_id(trade["market_id"])
-            if market_info and market_info.get("price"):
+            if market_info and market_info.get("price") is not None:
                 market_price = market_info["price"]
         except Exception:
             pass
@@ -295,6 +304,16 @@ def run_extended_positions_pass(dry_run: bool = False):
             "hours_to_close":     hours_to_close,
             "days_to_resolution": days_to_res,
         }
+
+        city_name = (trade.get("city") or "?").title()
+        dir_label = trade["direction"].upper()
+        ens_label = f"{int(ens_yes)}/{ens_n}" if ens_yes is not None and ens_n else "?"
+        htc_label = f"{hours_to_close:.1f}h" if hours_to_close is not None else "?"
+        print(
+            f"  [extended] {city_name:<14} {dir_label}  "
+            f"mkt={market_price:.0%}  mdl={model_prob:.0%}  "
+            f"ens={ens_label}  close={htc_label}  legs={db.get_leg_count(trade['id'])}"
+        )
 
         result = check_extended_position(trade, current_scan)
         if result is None:
@@ -337,6 +356,7 @@ def run_extended_positions_pass(dry_run: bool = False):
             "threshold":          trade.get("threshold"),
         }
 
+        legs_before = db.get_leg_count(result["parent_trade_id"])
         _executor.place_extended_order(
             market=market,
             direction=direction,
@@ -345,6 +365,10 @@ def run_extended_positions_pass(dry_run: bool = False):
             parent_trade_id=result["parent_trade_id"],
             leg_number=result["leg_number"],
         )
+        if db.get_leg_count(result["parent_trade_id"]) == legs_before:
+            # Order was rejected — suppress this trade from extend checks for cooldown period
+            from weather_extended import record_extend_rejection
+            record_extend_rejection(result["parent_trade_id"])
 
 
 

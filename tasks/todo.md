@@ -45,34 +45,56 @@ enabling per-trader accuracy scoring by city / season / geography over time.
 
 ---
 
-## Pyramid / Scale-In Model
+## WEAK-Tier Unanimous Ensemble Entry — DESIGN PENDING
 
-Size into winning positions rather than fixed-size single entries.
+Allow WEAK-tier entries when meteorological ensemble is unanimous (0/69 or 69/69) and conviction is green. Enter at reduced Kelly (e.g. 50%). Rationale: model is maximally confident, the "WEAK" label just means thin price edge, not low confidence. Currently these are skipped entirely — leaving money on the table.
 
-- [ ] Design: entry at initial Kelly size; add-on triggers when ensemble conviction increases (and its closer to time to close)
-  (e.g. ens_pct crosses 0.80 with ≥20% price improvement since entry)
-- [ ] Max pyramid depth: 2 add-ons per market (3 legs total)
-- [ ] Each leg tracked as separate trade record in DB (or a `parent_trade_id` FK)
-- [ ] Exit logic: close all legs together on ensemble flip; partial exits TBD
-- [ ] Config keys: `pyramid_max_legs`, `pyramid_add_on_min_conviction`, `pyramid_add_on_min_price_improvement`
+- [ ] Design spec
+- [ ] Implementation
 
 ---
 
-## Risk Management — DESIGNED, IMPLEMENTATION PENDING
+## Extended Positions (Scale-In) — COMPLETE
+
+Spec: `docs/superpowers/specs/2026-04-08-extended-positions-design.md`
+Plan: `docs/superpowers/plans/2026-04-08-extended-positions.md` (12 tasks)
+
+Up to 2 add-on legs per position. Eligibility: time-band gating (12h spacing from close), 12h cooldown between legs, ensemble ratchet (conviction must hold or strengthen vs previous leg), fresh Kelly sizing, exposure cap. All legs exit together on any exit trigger. Dashboard shows grouped parent/child with per-leg expanders.
+
+- [x] Config keys (4 new `extended_positions_*` params)
+- [x] DB schema (`parent_trade_id`, `leg_number`) + 4 helper queries
+- [x] Core eligibility logic (`weather_extended.py`)
+- [x] Bot loop integration (`run_extended_positions_pass`)
+- [x] Executor `place_extended_order` + `close_position`
+- [x] Exit logic — all-legs-together close
+- [x] Dashboard — open + closed position grouping with per-leg expanders
+- [x] Integration verification (all files compile, imports clean)
+
+**Revisit after 30+ post-fix resolved trades:** Re-evaluate whether add-on trigger should also incorporate (A) price improvement or (B) market confirmation. Only 7 post-fix trades as of 2026-04-08, zero resolved — starting with ensemble conviction only.
+
+- [ ] Consider unrealized P&L gate on leg trades — skip add-ons if parent position is underwater (e.g. >-15% unr P&L). Rationale: even with strong ensemble conviction, negative P&L means market is moving against us. Counter-argument: contrarian model + confirmed ensemble = good averaging opportunity. Needs data to evaluate. (Added 2026-04-09 after Chicago >=56F double loss — though root cause was stale ensemble from 0.2h test cooldown, not missing P&L check)
+
+Deployed to PythonAnywhere: pending
+
+---
+
+## Risk Management — COMPLETE & DEPLOYED
 
 Spec: `docs/superpowers/specs/2026-04-07-risk-management-design.md`
 Plan: `docs/superpowers/plans/2026-04-07-risk-management.md` (10 tasks)
 
-- [ ] Daily loss circuit breaker — 15% of account value (realized losses only), halts entries
-- [ ] Circuit breaker override — dashboard button, suppresses for remainder of UTC day
-- [ ] Close all button — dashboard sidebar, double confirmation, re-entry block
-- [ ] Per-trade close button — per row in open positions table, double confirmation, re-entry block
-- [ ] Re-entry block list — JSON file IPC, prevents bot re-entering manually closed markets
-- [ ] Risk status banner — red HALTED banner on dashboard when circuit breaker trips
-- [ ] Email notifications — SMTP alerts for circuit breaker + manual close-all events
+- [x] Daily loss circuit breaker — 15% of account value (realized losses only), halts entries
+- [x] Circuit breaker override — dashboard button, suppresses for remainder of UTC day
+- [x] Close all button — dashboard sidebar, double confirmation, re-entry block
+- [x] Per-trade close button — per row in open positions table, double confirmation, re-entry block
+- [x] Re-entry block list — JSON file IPC, prevents bot re-entering manually closed markets
+- [x] Risk status banner — red HALTED banner on dashboard when circuit breaker trips
+- [x] Email notifications — SMTP alerts for circuit breaker + manual close-all events
 - [x] ~~Max drawdown halt~~ — intentionally excluded (not appropriate for prediction markets)
 - [x] ~~Kill switch (STOP file)~~ — intentionally excluded (dashboard controls + process stop suffice)
 - [x] ~~VaR(95%)~~ — intentionally excluded (binary outcomes, not useful)
+
+Deployed to PythonAnywhere 2026-04-08.
 
 ---
 
