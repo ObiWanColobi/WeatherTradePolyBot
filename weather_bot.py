@@ -25,6 +25,7 @@ from executor.paper import PaperExecutor
 from executor.weather_exit import check_weather_exit
 from weather_scanner import run_scan
 from weather_decision import evaluate, print_audit
+from weather_extended import check_extended_position
 from weather_resolver import run_resolve_pass
 import weather_catalog
 import weather_calibration_scheduler as _calibration
@@ -66,8 +67,11 @@ def run_exit_pass():
     # Re-fetch after update so the exit loop sees the freshly-written prices,
     # not the stale values from before update_open_positions() ran.
     open_trades = db.get_open_trades()
+    closed_this_pass = set()
 
     for trade in open_trades:
+        if trade["id"] in closed_this_pass:
+            continue
         # Reconstruct the minimal market dict from stored trade fields.
         # The Gamma API has no reliable single-market lookup endpoint —
         # ?conditionId= ignores the filter, /markets/<id> returns 422.
@@ -113,11 +117,17 @@ def run_exit_pass():
         )
 
         if sig.should_exit:
+            parent_id = trade.get("parent_trade_id") or trade["id"]
+            legs = db.get_position_legs(parent_id)
+            n_legs = len(legs)
+            leg_suffix = f" (closing all {n_legs} legs)" if n_legs > 1 else ""
             print(
-                f"  [exit] {_pos_line}  -- {sig.reason}"
+                f"  [exit] {_pos_line}  -- {sig.reason}{leg_suffix}"
                 + (" [URGENT]" if sig.urgent else "")
             )
-            _executor.close_full(trade, reason=sig.reason)
+            _executor.close_position(trade, reason=sig.reason)
+            for leg in legs:
+                closed_this_pass.add(leg["id"])
         else:
             print(f"  [hold] {_pos_line}  -- {sig.reason}")
 
@@ -218,6 +228,124 @@ def run_entry_pass(already_traded: set, max_bet: float, dry_run: bool = False) -
         entered += 1
 
     return entered, weather_condition_ids
+
+
+# -- Extended positions pass ---------------------------------------------------
+
+def run_extended_positions_pass(dry_run: bool = False):
+    """Check open parent trades for scale-in add-on eligibility."""
+    if not WEATHER.get("extended_positions_enabled", True):
+        return
+
+    open_trades = db.get_open_trades()
+    parents = [t for t in open_trades if not t.get("parent_trade_id")]
+
+    if not parents:
+        return
+
+    for trade in parents:
+        market_data = {
+            "question": trade["market_name"],
+            "id":       trade["market_id"],
+            "end_date": trade.get("end_date", ""),
+            "price":    trade.get("entry_price") or trade.get("fill_price", 0.5),
+            "token_id": trade.get("token_id"),
+        }
+
+        try:
+            scan_data = _layer.scan(market_data)
+        except Exception:
+            continue
+
+        if not scan_data or scan_data.get("ensemble_n", 0) < 10:
+            continue
+
+        ens_yes = scan_data.get("yes_ensemble")
+        ens_n   = scan_data.get("ensemble_n")
+        model_prob = scan_data.get("prob")
+        market_price = trade.get("entry_price") or 0.5
+
+        try:
+            import markets.polymarket as _pm
+            market_info = _pm.get_market_by_id(trade["market_id"])
+            if market_info and market_info.get("price"):
+                market_price = market_info["price"]
+        except Exception:
+            pass
+
+        hours_to_close = None
+        end_date = trade.get("end_date", "")
+        if end_date:
+            try:
+                end = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                if end.tzinfo is None:
+                    end = end.replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
+                hours_to_close = (end - datetime.now(timezone.utc)).total_seconds() / 3600
+            except Exception:
+                pass
+
+        days_to_res = int(hours_to_close / 24) if hours_to_close is not None else 0
+
+        current_scan = {
+            "ens_yes":            ens_yes,
+            "ens_n":              ens_n,
+            "ens_pct":            ens_yes / ens_n if ens_yes is not None and ens_n else None,
+            "model_prob":         model_prob,
+            "market_price":       market_price,
+            "hours_to_close":     hours_to_close,
+            "days_to_resolution": days_to_res,
+        }
+
+        result = check_extended_position(trade, current_scan)
+        if result is None:
+            continue
+
+        city      = (trade.get("city") or "?").title()
+        direction = result["direction"]
+        leg_num   = result["leg_number"]
+
+        print(
+            f"\n  [extend] {city} {direction} — adding leg {leg_num}  "
+            f"size=${result['size_usdc']:.2f}  ens={int(result['ens_yes'])}/{result['ens_n']}  "
+            f"hours_left={result['hours_to_close']:.1f}h"
+        )
+
+        if dry_run:
+            print("  [extend] DRY RUN — add-on not placed.")
+            continue
+
+        market = {
+            "id":          trade["market_id"],
+            "question":    trade["market_name"],
+            "end_date":    trade.get("end_date"),
+            "price":       market_price,
+            "token_id":    trade.get("token_id"),
+            "city":        trade.get("city"),
+            "market_url":  trade.get("market_url"),
+            "liquidity":   trade.get("liquidity"),
+            "volume":      trade.get("volume_24h"),
+        }
+
+        estimate = {
+            "probability":        result["model_prob"],
+            "edge_score":         (result["model_prob"] - market_price) * 100 if direction == "YES"
+                                  else (market_price - result["model_prob"]) * 100,
+            "sources":            ["weather_forecast"],
+            "entry_ensemble_pct": result["ens_pct"],
+            "entry_ensemble_yes": result["ens_yes"],
+            "entry_ensemble_n":   result["ens_n"],
+            "threshold":          trade.get("threshold"),
+        }
+
+        _executor.place_extended_order(
+            market=market,
+            direction=direction,
+            size_usdc=result["size_usdc"],
+            estimate=estimate,
+            parent_trade_id=result["parent_trade_id"],
+            leg_number=result["leg_number"],
+        )
+
 
 
 # -- Main loop ----------------------------------------------------------------
@@ -377,6 +505,10 @@ def run(dry_run: bool = False):
                   f"({_risk_manager.get_loss_pct():.1%} of account)")
             entered = 0
             weather_condition_ids = set()
+
+        # Extended positions pass — scale into existing positions
+        if risk_state == RiskState.NORMAL:
+            run_extended_positions_pass(dry_run=dry_run)
 
         # Trader monitor — poll tracked wallets for live positions every 10 polls
         if poll % TRADER_MONITOR_EVERY_N == 0:
