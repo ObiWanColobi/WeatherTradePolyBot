@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from executor.base import BaseExecutor
 import markets.polymarket as polymarket
 import db
+from config import WEATHER
 
 
 class PaperExecutor(BaseExecutor):
@@ -116,6 +117,99 @@ class PaperExecutor(BaseExecutor):
         print(f"              Size: ${filled_usdc:.2f}  Fill: {fill_price:.4f}  "
               f"Slippage: {slippage:.4f}  Edge: {edge_display:+.3f}")
 
+    # ── Extended position add-on ─────────────────────────────────────────────
+
+    def place_extended_order(self, market: dict, direction: str, size_usdc: float,
+                              estimate: dict, parent_trade_id: int, leg_number: int):
+        """Place an add-on leg for an existing extended position."""
+        balance = db.get_balance()
+        if size_usdc > balance:
+            print(f"[paper] Skipping add-on — insufficient balance ${balance:.2f} < ${size_usdc:.2f}")
+            return
+
+        # Parent trade already stores the correct directional token_id
+        token_id = market.get("token_id")
+        if not token_id:
+            return
+
+        fill_price, filled_usdc = self._simulate_fill(token_id, "BUY", size_usdc)
+
+        if filled_usdc < 1.0:
+            print(f"[paper] Skipping add-on — order book too thin")
+            return
+
+        # Slippage check with size reduction fallback (75%, 50%, 25%)
+        yes_price = market.get("price", 0.5)
+        if direction == "YES":
+            token_mid = yes_price
+        else:
+            token_mid = 1.0 - yes_price
+
+        max_slippage = WEATHER.get("entry_max_slippage_pct", 0.05)
+        slippage_pct = abs(fill_price - token_mid) / token_mid if token_mid > 0 else 0
+        if slippage_pct > max_slippage:
+            for frac in (0.75, 0.50, 0.25):
+                reduced = size_usdc * frac
+                if reduced < 1.0:
+                    break
+                fill_price, filled_usdc = self._simulate_fill(token_id, "BUY", reduced)
+                slippage_pct = abs(fill_price - token_mid) / token_mid if token_mid > 0 else 0
+                if slippage_pct <= max_slippage:
+                    break
+            else:
+                print(f"[paper] Skipping add-on — slippage too high even at 25% size")
+                return
+            if slippage_pct > max_slippage:
+                print(f"[paper] Skipping add-on — slippage {slippage_pct:.1%} > {max_slippage:.0%}")
+                return
+
+        shares = filled_usdc / fill_price
+
+        trade = {
+            "market_id":       market["id"],
+            "market_name":     market["question"],
+            "token_id":        token_id,
+            "end_date":        market.get("end_date"),
+            "direction":       direction,
+            "size_usdc":       filled_usdc,
+            "shares":          shares,
+            "entry_price":     market.get("price", 0.5),
+            "fill_price":      fill_price,
+            "current_price":   fill_price,
+            "peak_price":      fill_price,
+            "exit_price":      None,
+            "opened_at":       datetime.utcnow().isoformat(),
+            "hours_to_close_at_entry": _hours_until(market.get("end_date")),
+            "closed_at":       None,
+            "status":          "open",
+            "pnl":             None,
+            "pnl_pct":         None,
+            "layers_used":     ", ".join(estimate.get("sources", [])),
+            "estimated_prob":  estimate.get("probability"),
+            "edge_score":      estimate.get("edge_score"),
+            "liquidity":       market.get("liquidity"),
+            "volume_24h":      market.get("volume"),
+            "city":            market.get("city"),
+            "entry_ensemble_pct": estimate.get("entry_ensemble_pct"),
+            "entry_ensemble_yes": estimate.get("entry_ensemble_yes"),
+            "entry_ensemble_n":   estimate.get("entry_ensemble_n"),
+            "market_url":      market.get("market_url", ""),
+            "threshold":       estimate.get("threshold"),
+            "bleed_rungs_hit": 0,
+            "exit_reason":     None,
+            "parent_trade_id": parent_trade_id,
+            "leg_number":      leg_number,
+        }
+
+        db.insert_trade(trade)
+        db.update_balance(-filled_usdc)
+        db.record_account_value()
+
+        slippage = abs(fill_price - token_mid)
+        print(f"[paper] ADD-ON Leg {leg_number}  {direction:3s}  {market['question'][:50]}")
+        print(f"              Size: ${filled_usdc:.2f}  Fill: {fill_price:.4f}  "
+              f"Slippage: {slippage:.4f}")
+
     # ── Position closing ──────────────────────────────────────────────────────
 
     def close_partial(self, trade: dict, sell_pct: float, reason: str):
@@ -148,6 +242,19 @@ class PaperExecutor(BaseExecutor):
     def close_full(self, trade: dict, reason: str):
         current_price = trade.get("current_price") or trade["fill_price"]
         self._finalise_close(trade, current_price, reason)
+
+    def close_position(self, trade: dict, reason: str):
+        """
+        Close all legs of an extended position (or a single non-extended trade).
+        Each leg gets its own close_full with individual P&L.
+        """
+        parent_id = trade.get("parent_trade_id") or trade["id"]
+        legs = db.get_position_legs(parent_id)
+        if not legs:
+            self.close_full(trade, reason=reason)
+            return
+        for leg in legs:
+            self.close_full(leg, reason=reason)
 
     def settle_resolved(self, trade: dict, resolved_yes: bool):
         """
