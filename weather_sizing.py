@@ -151,6 +151,6 @@ def size_summary(
         "kelly_frac":      kelly * horizon_mult * _KELLY_FRACTION,
         "size_usdc":       size,
         "balance":         balance,
-        "max_bet":         _MAX_BET_USDC,
+        "max_bet":         _MAX_BET_USDC_UNANIMOUS if unanimous else _MAX_BET_USDC,
         "days_to_resolve": days_to_resolution,
     }
