@@ -183,8 +183,11 @@ def evaluate(
             continue
 
         # ── 4. Kelly size (with horizon discount) ─────────────────────────────
-        size = kelly_size(balance, mdl_prob, mkt_price, direction, ens_n, days)
-        size = min(size, max_bet)
+        # Unanimous entries use a separate, smaller cap (see weather_sizing.py).
+        is_unanimous = entry.checks.get("edge", {}).get("unanimous", False)
+        size = kelly_size(balance, mdl_prob, mkt_price, direction, ens_n, days, unanimous=is_unanimous)
+        if not is_unanimous:
+            size = min(size, max_bet)   # only apply the override cap to normal trades
 
         if size == 0.0:
             rejected.append(DecisionResult(
@@ -261,10 +264,11 @@ def evaluate(
         provisional_count    += 1
         provisional_exposure += size
 
+        unanimous_tag = " [unanimous]" if is_unanimous else ""
         approved.append(DecisionResult(
             candidate=candidate,
             verdict="APPROVED",
-            reason="all checks passed",
+            reason=f"all checks passed{unanimous_tag}",
             direction=direction,
             score=score,
             size_usdc=size,

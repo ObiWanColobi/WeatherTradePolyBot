@@ -179,7 +179,10 @@ def run_entry_pass(already_traded: set, max_bet: float, dry_run: bool = False) -
     # Always log rejections so you can see why opportunities were skipped
     for r in rejected:
         c      = r.candidate
-        _tier  = "STRONG" if c["edge_pct"] >= 0.30 else "EDGE" if c["edge_pct"] >= 0.15 else "WEAK"
+        _ens_pct = c.get("ens_pct") or 0
+        _conv    = max(_ens_pct, 1 - _ens_pct)
+        _utag    = " [unanimous]" if _conv >= 0.97 else ""
+        _tier    = "STRONG" if c["edge_pct"] >= 0.30 else "EDGE" if c["edge_pct"] >= 0.15 else f"WEAK{_utag}"
         _ens   = f"{c['ens_yes']}/{c['ens_n']}" if c.get("ens_yes") is not None else "?"
         _vol   = f"${c['volume']:,.0f}" if c.get("volume") is not None else "?"
         _hrs   = f"{c['hours_to_close']:.0f}h" if c.get("hours_to_close") is not None else "?"
