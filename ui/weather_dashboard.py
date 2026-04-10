@@ -134,7 +134,6 @@ with st.sidebar:
     st.subheader("Exit Triggers")
     st.caption(f"Ensemble flip:    >{WEATHER.get('exit_ensemble_flip_threshold', 0.25):.0%} shift")
     st.caption(f"Adverse move:     >{WEATHER.get('exit_adverse_price_move_pct', 0.30):.0%} of fill")
-    st.caption(f"Max spread:       ${WEATHER.get('exit_max_spread_cents', 0.08):.2f}")
     st.caption(f"Hold window:      <{WEATHER.get('exit_no_exit_hours_to_close', 2.0):.0f}h to close")
 
     st.divider()

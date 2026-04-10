@@ -25,7 +25,8 @@ _MIN_COOLDOWN_H      = WEATHER.get("extended_positions_min_cooldown_hours", 12.0
 _REJECT_COOLDOWN_H   = WEATHER.get("extended_positions_rejection_cooldown_hours", 2.0)
 _MAX_SLIPPAGE_PCT    = WEATHER.get("entry_max_slippage_pct", 0.05)
 _MIN_NET_EDGE        = WEATHER.get("extended_positions_min_net_edge", 0.03)
-_MAX_EXPOSURE        = WEATHER.get("decision_max_exposure_pct", 0.90)
+_MAX_EXPOSURE             = WEATHER.get("decision_max_exposure_pct", 0.90)
+_UNANIMOUS_MIN_CONVICTION = WEATHER.get("entry_unanimous_min_conviction", 0.97)
 
 # In-memory cooldown for rejected extend attempts (trade_id -> last attempt datetime)
 _rejected_attempts: dict[int, datetime] = {}
@@ -138,10 +139,14 @@ def check_extended_position(trade: dict, current_scan: dict | None) -> dict | No
             return _reject(trade, f"ratchet weaker ({int(cur_ens_yes)}/{cur_ens_n} < {int(prev_ens_yes)}/{prev_ens_n})")
 
     # 5. Kelly sizing
-    balance = db.get_balance()
-    model_prob = current_scan.get("model_prob") or 0
+    # Re-derive unanimity from current ensemble — a normal-entry parent can reach
+    # unanimous conviction by leg time, and vice versa. Don't inherit from parent.
+    balance      = db.get_balance()
+    model_prob   = current_scan.get("model_prob") or 0
     market_price = current_scan.get("market_price") or 0.5
-    days_to_res = current_scan.get("days_to_resolution") or 0
+    days_to_res  = current_scan.get("days_to_resolution") or 0
+    cur_conviction = max(cur_ratio, 1.0 - cur_ratio)
+    is_unanimous   = cur_conviction >= _UNANIMOUS_MIN_CONVICTION
 
     size = kelly_size(
         balance=balance,
@@ -150,6 +155,7 @@ def check_extended_position(trade: dict, current_scan: dict | None) -> dict | No
         direction=direction,
         ensemble_n=cur_ens_n,
         days_to_resolution=days_to_res,
+        unanimous=is_unanimous,
     )
     if size <= 0:
         return _reject(trade, f"kelly size zero (mdl={model_prob:.2f} mkt={market_price:.2f})")

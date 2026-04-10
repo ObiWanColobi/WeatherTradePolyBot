@@ -50,7 +50,6 @@ WEATHER = {
     "exit_adverse_min_move_cents":  0.10,  # floor: never exit on moves smaller than 10 cents (prevents noise exits on cheap tokens)
     "exit_adverse_min_hold_minutes": 60,   # no adverse exit within first 60 min (post-entry price settling)
     "exit_adverse_skip_unanimous_pct": 0.90,  # skip adverse exit when ensemble conviction >= 90% (trust the model)
-    "exit_max_spread_cents":        0.22,  # exit if spread widens past $0.22 (only checked within final 12h)
     "exit_no_exit_hours_to_close":  2.0,   # never exit within 2h of resolution
 
     # ── Kelly position sizing ─────────────────────────────────────────────────

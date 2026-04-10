@@ -5,10 +5,9 @@ Exit logic for same-day weather markets. Fundamentally different from
 the general exit manager — default is to HOLD to resolution, not ladder out.
 
 Exit triggers (checked in priority order):
-  1. Ensemble flip    — new model run shifts consensus >25pts from entry signal
-  2. Price adverse    — market price moves >15c against position (crowd knows something)
-  3. Liquidity dry-up — spread widens past threshold or volume collapses
-  4. Within 2h close  — never exit in final 2 hours (ride it out)
+  1. Ensemble flip  — new model run shifts consensus >25pts from entry signal
+  2. Price adverse  — market price moves >15c against position (crowd knows something)
+  3. Within 2h close — never exit in final 2 hours (ride it out)
 
 What we deliberately do NOT do:
   - Bleed-off ladders (leaving money on the table before resolution)
@@ -19,7 +18,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from config import WEATHER
-from markets.polymarket import get_orderbook
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -28,9 +26,7 @@ _ADVERSE_PRICE_MOVE_PCT   = WEATHER.get("exit_adverse_price_move_pct",    0.30)
 _ADVERSE_MIN_MOVE         = WEATHER.get("exit_adverse_min_move_cents",    0.10)
 _ADVERSE_MIN_HOLD_MINUTES = WEATHER.get("exit_adverse_min_hold_minutes",  60)
 _ADVERSE_SKIP_UNANIMOUS   = WEATHER.get("exit_adverse_skip_unanimous_pct", 0.90)
-_MAX_SPREAD_EXIT          = WEATHER.get("exit_max_spread_cents",          0.22)
 _NO_EXIT_HOURS            = WEATHER.get("exit_no_exit_hours_to_close",    2.0)
-_SPREAD_CHECK_HOURS_MAX   = WEATHER.get("exit_spread_check_hours_max",   12.0)
 
 
 @dataclass
@@ -133,20 +129,6 @@ def check_weather_exit(trade: dict, market_data: dict, current_ensemble_pct: flo
                         urgent=True,
                     )
 
-    # ── 3. Liquidity dry-up ───────────────────────────────────────────────────
-    # Only check spread within the final hours window — wide spreads 24-48h out
-    # are normal thin-trading noise, not a signal to exit.
-    if hours_left is not None and hours_left <= _SPREAD_CHECK_HOURS_MAX:
-        token_id = trade.get("token_id") or market_data.get("token_id")
-        if token_id:
-            spread = _get_spread(token_id, current_price or fill_price)
-            if spread > _MAX_SPREAD_EXIT:
-                return WeatherExitSignal(
-                    should_exit=True,
-                    reason=f"spread too wide: ${spread:.3f} > ${_MAX_SPREAD_EXIT:.3f}",
-                    urgent=False,
-                )
-
     return WeatherExitSignal(should_exit=False, reason="hold — no exit condition met")
 
 
@@ -173,17 +155,3 @@ def _minutes_since(iso_str: str) -> float | None:
         return delta.total_seconds() / 60
     except Exception:
         return None
-
-
-def _get_spread(token_id: str, mid: float) -> float:
-    try:
-        book     = get_orderbook(token_id)
-        bids     = book.get("bids", [])
-        asks     = book.get("asks", [])
-        if not bids or not asks:
-            return 1.0
-        best_bid = float(max(bids, key=lambda x: float(x["price"]))["price"])
-        best_ask = float(min(asks, key=lambda x: float(x["price"]))["price"])
-        return best_ask - best_bid
-    except Exception:
-        return 1.0
