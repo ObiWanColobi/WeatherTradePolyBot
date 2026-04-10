@@ -48,12 +48,13 @@ enabling per-trader accuracy scoring by city / season / geography over time.
 
 ---
 
-## WEAK-Tier Unanimous Ensemble Entry — DESIGN PENDING
+## WEAK-Tier Unanimous Ensemble Entry — COMPLETE
 
-Allow WEAK-tier entries when meteorological ensemble is unanimous (0/69 or 69/69) and conviction is green. Enter at reduced Kelly (e.g. 50%). Rationale: model is maximally confident, the "WEAK" label just means thin price edge, not low confidence. Currently these are skipped entirely — leaving money on the table.
+Allow WEAK-tier entries when meteorological ensemble is unanimous (0/69 or 69/69) and conviction is green. Enter at reduced Kelly with separate $50 cap. Rationale: model is maximally confident, the "WEAK" label just means thin price edge, not low confidence.
 
-- [ ] Design spec
-- [ ] Implementation
+- [x] Design spec
+- [x] Implementation — 7% edge floor, $50 hard cap (`kelly_max_bet_usdc_unanimous`), `[unanimous]` tag in skip logs and entry logs
+- [x] Post-slippage net edge check — added 2026-04-10: real-world slippage on thin NO markets was 4-5%, eroding unanimous edge to <3% net. Added `entry_min_net_edge_pct: 0.05` gate (applies to all tiers) in decision layer step 5b. Also raised `extended_positions_min_net_edge` 0.03→0.05 for consistency. Tested and verified in live log review.
 
 ---
 
@@ -77,7 +78,7 @@ Up to 2 add-on legs per position. Eligibility: time-band gating (12h spacing fro
 
 - [ ] Consider unrealized P&L gate on leg trades — skip add-ons if parent position is underwater (e.g. >-15% unr P&L). Rationale: even with strong ensemble conviction, negative P&L means market is moving against us. Counter-argument: contrarian model + confirmed ensemble = good averaging opportunity. Needs data to evaluate. (Added 2026-04-09 after Chicago >=56F double loss — though root cause was stale ensemble from 0.2h test cooldown, not missing P&L check)
 
-Deployed to PythonAnywhere: pending
+Deployed to PythonAnywhere: pending — pre-push review completed 2026-04-10, logs/DB/screenshots clean, ready to push
 
 ---
 
