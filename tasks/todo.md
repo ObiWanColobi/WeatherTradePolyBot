@@ -24,6 +24,9 @@ enabling per-trader accuracy scoring by city / season / geography over time.
 - [ ] Ensemble weighting: opt-in `trader_consensus_weighted` config flag + weighted variant of `get_trader_consensus`
 - [ ] Ensemble weighting: replace equal-weight consensus with accuracy-weighted once ≥50 resolved forecasts per top trader accumulate
 
+**Dashboard UI:**
+- [ ] Custom HTML tables for open/closed positions — sortable columns that preserve parent/child leg grouping (current Streamlit dataframe sorting breaks inline sub-rows)
+
 **Hardening (defer until observed in live testing):**
 - [ ] Stuck-market cleanup: expire `trader_positions` rows for markets >30 days past `end_date` with no resolution detected
 - [ ] `min_last_active_days` filter if stale-wallet noise shows up in dashboard data

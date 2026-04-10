@@ -346,7 +346,15 @@ st.divider()
 
 # ── Open positions ────────────────────────────────────────────────────────────
 
-st.subheader(f"Open Positions ({len(open_trades)})")
+_c1, _c2 = st.columns([6, 1])
+with _c1:
+    st.subheader(f"Open Positions ({len(open_trades)})")
+with _c2:
+    if "op_table_reset" not in st.session_state:
+        st.session_state["op_table_reset"] = 0
+    if st.button("↻ Reset sort", key="btn_reset_op"):
+        st.session_state["op_table_reset"] += 1
+        st.rerun()
 
 if open_trades:
     # Group extended positions: parents with aggregated legs, standalone unchanged
@@ -364,8 +372,7 @@ if open_trades:
         else:
             _op_standalone.append(t)
 
-    # Build display list: standalone trades + parent aggregates
-    _op_display = list(_op_standalone)
+    # Build aggregates for parent positions
     _op_aggregates = {}  # parent_id → aggregate dict
 
     for pid, children in _op_parent_map.items():
@@ -387,8 +394,19 @@ if open_trades:
         agg["_unreal_override"] = total_unreal
         agg["_leg_display"] = f"{leg_count}/{max_legs} legs"
         agg["_legs"] = all_legs
-        _op_display.append(agg)
         _op_aggregates[pid] = agg
+
+    # Build display list in original query order (opened_at DESC),
+    # placing aggregates where their parent naturally appears
+    _op_display = []
+    for t in open_trades:
+        pid = t.get("parent_trade_id")
+        if pid is not None:
+            continue  # child leg — rendered inline under its parent
+        if t["id"] in _op_aggregates:
+            _op_display.append(_op_aggregates[t["id"]])
+        else:
+            _op_display.append(t)
 
     rows = []
     for t in _op_display:
@@ -483,7 +501,8 @@ if open_trades:
         col_cfg["Market"] = st.column_config.LinkColumn(
             "Market", display_text=r"https://polymarket\.com/event/([^/]+)",
         )
-    st.dataframe(df_open, column_config=col_cfg, width='stretch', hide_index=True)
+    st.dataframe(df_open, column_config=col_cfg, width='stretch', hide_index=True,
+                 key=f"df_open_{st.session_state.get('op_table_reset', 0)}")
 
     # Per-trade close buttons — horizontal row of buttons, confirmation below
     st.caption("Manual close:")
@@ -620,7 +639,15 @@ st.divider()
 
 # ── Trade history ─────────────────────────────────────────────────────────────
 
-st.subheader(f"Trade History ({len(closed_trades)} closed)")
+_c3, _c4 = st.columns([6, 1])
+with _c3:
+    st.subheader(f"Trade History ({len(closed_trades)} closed)")
+with _c4:
+    if "cl_table_reset" not in st.session_state:
+        st.session_state["cl_table_reset"] = 0
+    if st.button("↻ Reset sort", key="btn_reset_cl"):
+        st.session_state["cl_table_reset"] += 1
+        st.rerun()
 
 if closed_trades:
     # Group extended positions in closed trades
@@ -637,7 +664,6 @@ if closed_trades:
         else:
             _cl_standalone.append(t)
 
-    _cl_display = list(_cl_standalone)
     _cl_aggregates = {}
 
     for pid, children in _cl_parent_map.items():
@@ -660,8 +686,19 @@ if closed_trades:
         agg["pnl_pct"] = (total_pnl / total_size * 100) if total_size else 0
         agg["_leg_display"] = f"{leg_count} legs"
         agg["_legs"] = all_legs
-        _cl_display.append(agg)
         _cl_aggregates[pid] = agg
+
+    # Build display list in original query order,
+    # placing aggregates where their parent naturally appears
+    _cl_display = []
+    for t in closed_trades:
+        pid = t.get("parent_trade_id")
+        if pid is not None:
+            continue  # child leg — rendered inline under its parent
+        if t["id"] in _cl_aggregates:
+            _cl_display.append(_cl_aggregates[t["id"]])
+        else:
+            _cl_display.append(t)
 
     rows = []
     for t in _cl_display:
@@ -755,7 +792,8 @@ if closed_trades:
         closed_col_cfg["Market"] = st.column_config.LinkColumn(
             "Market", display_text=r"https://polymarket\.com/event/([^/]+)",
         )
-    st.dataframe(df_closed, column_config=closed_col_cfg, width='stretch', hide_index=True)
+    st.dataframe(df_closed, column_config=closed_col_cfg, width='stretch', hide_index=True,
+                 key=f"df_closed_{st.session_state.get('cl_table_reset', 0)}")
 
     st.divider()
 
