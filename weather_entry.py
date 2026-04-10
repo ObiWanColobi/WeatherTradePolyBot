@@ -40,6 +40,8 @@ _MIN_FILL_PRICE          = WEATHER.get("entry_min_fill_price",          0.15)
 _MIN_FILL_PRICE_YES      = WEATHER.get("entry_min_fill_price_yes",      0.25)
 _MIN_ENSEMBLE_MARGIN_C       = WEATHER.get("entry_min_ensemble_margin_c",       2.0)
 _MIN_ENSEMBLE_MARGIN_FLOOR   = WEATHER.get("entry_min_ensemble_margin_c_floor", 1.5)
+_UNANIMOUS_MIN_CONVICTION    = WEATHER.get("entry_unanimous_min_conviction",    0.97)
+_UNANIMOUS_MIN_EDGE_PCT      = WEATHER.get("entry_unanimous_min_edge_pct",      0.07)
 
 
 @dataclass
@@ -111,14 +113,26 @@ def check_entry(market: dict, scan_data: dict, direction: str | None = None) -> 
             )
 
     # ── 2. Edge ───────────────────────────────────────────────────────────────
+    # Unanimous ensembles (>=97% conviction) get a relaxed floor of 7% instead
+    # of the normal 12%. The thin edge reflects a market that has mostly priced
+    # in the outcome — there's still remaining value worth capturing.
+    is_unanimous    = conviction >= _UNANIMOUS_MIN_CONVICTION
+    effective_floor = _UNANIMOUS_MIN_EDGE_PCT if is_unanimous else _MIN_EDGE_PCT
+
     edge_pct = scan_data.get("edge_prob", 0)
     checks["edge"] = {
-        "ok":    edge_pct >= _MIN_EDGE_PCT,
-        "value": f"{edge_pct:.1%}",
-        "need":  f">={_MIN_EDGE_PCT:.1%}",
+        "ok":        edge_pct >= effective_floor,
+        "value":     f"{edge_pct:.1%}",
+        "need":      f">={effective_floor:.1%}",
+        "unanimous": is_unanimous,
     }
     if not checks["edge"]["ok"]:
-        return EntryDecision(ok=False, reason="edge too small", checks=checks)
+        reason = (
+            f"edge too small (unanimous: need >={_UNANIMOUS_MIN_EDGE_PCT:.0%})"
+            if is_unanimous
+            else "edge too small"
+        )
+        return EntryDecision(ok=False, reason=reason, checks=checks)
 
     # ── 3. Volume (two-tier) ──────────────────────────────────────────────────
     city      = scan_data.get("city", "")
