@@ -207,11 +207,12 @@ def run_entry_pass(already_traded: set, max_bet: float, dry_run: bool = False) -
 
         consensus = result.checks.get("trader_consensus", {})
         consensus_str = f"  traders={consensus['signal']}({consensus['same']}vs{consensus['opp']})" if consensus else ""
+        utag = " [unanimous]" if "[unanimous]" in result.reason else ""
         print(
             f"\n  [entry] {c['city_display']} {result.direction.upper()}  "
             f"edge={c['edge_pct']:.0%}  score={result.score:.3f}  "
             f"size=${result.size_usdc:.2f}  days_out={c['days_to_resolution']}"
-            f"{consensus_str}"
+            f"{utag}{consensus_str}"
         )
 
         if dry_run:

@@ -40,6 +40,7 @@ _MAX_POSITIONS_PER_CITY_DATE = WEATHER.get("decision_max_positions_per_city_date
 _MAX_BET_USDC        = WEATHER.get("kelly_max_bet_usdc",          50.00)
 _MAX_SLIPPAGE_PCT    = WEATHER.get("entry_max_slippage_pct",      0.05)
 _MIN_BET_USDC        = WEATHER.get("kelly_min_bet_usdc",          5.00)
+_MIN_NET_EDGE        = WEATHER.get("entry_min_net_edge_pct",      0.05)
 
 # Horizon discount table (mirrors weather_sizing.py — single source of truth
 # kept there; replicated here only for scoring, not for actual sizing)
@@ -236,6 +237,22 @@ def evaluate(
                     continue
 
                 size = reduced  # proceed with reduced size
+
+            # ── 5b. Post-slippage net edge check ──────────────────────────────
+            slippage_abs = slippage_pct * mid_price
+            net_edge     = candidate["edge_pct"] - slippage_abs
+            if net_edge < _MIN_NET_EDGE:
+                rejected.append(DecisionResult(
+                    candidate=candidate,
+                    verdict="REJECTED",
+                    reason=(
+                        f"net edge too low after slippage: "
+                        f"{net_edge:.3f} < {_MIN_NET_EDGE:.2f}"
+                    ),
+                    direction=direction,
+                    checks=entry.checks,
+                ))
+                continue
 
         # ── 6. Exposure cap ──────────────────────────────────────────────────────
         projected_exposure = total_exposure + provisional_exposure + size

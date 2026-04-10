@@ -76,6 +76,7 @@ WEATHER = {
     "entry_unanimous_min_conviction":  0.97,   # ≥97% of ensemble members (~67/69)
     "entry_unanimous_min_edge_pct":    0.07,   # relaxed floor when unanimous (vs 12% normal)
     "kelly_max_bet_usdc_unanimous":   50.00,   # separate hard cap for unanimous-weak trades
+    "entry_min_net_edge_pct":          0.05,   # minimum edge remaining after slippage, any tier (5%)
 
     # ── Decision layer ────────────────────────────────────────────────────────
     "decision_max_open_positions":        20,   # max concurrent open trades (increase freely)
@@ -123,7 +124,7 @@ WEATHER = {
     "extended_positions_leg_spacing_hours": 12.0,   # time-to-close band spacing per leg
     "extended_positions_min_cooldown_hours": 12.0,  # minimum hours between any two legs
     "extended_positions_rejection_cooldown_hours": 1.0,  # cooldown after a rejected extend attempt (slippage/thin book)
-    "extended_positions_min_net_edge":     0.03,  # minimum edge after slippage cost to bother extending (3%)
+    "extended_positions_min_net_edge":     0.05,  # minimum edge after slippage cost to bother extending (5%)
 }
 
 # ── API Endpoints ─────────────────────────────────────────────────────────────
