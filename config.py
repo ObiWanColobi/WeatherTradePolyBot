@@ -70,6 +70,14 @@ WEATHER = {
     "entry_min_ensemble_margin_c_floor": 1.5,   # margin floor for unanimous ensembles (0/69 or 69/69); scales linearly up to entry_min_ensemble_margin_c at min conviction
     "entry_max_slippage_pct":        0.05,  # max simulated fill slippage as % of mid (5%)
 
+    # ── Unanimous weak-edge entry ─────────────────────────────────────────────
+    # When ensemble conviction is >= this threshold (~67/69 members), the edge
+    # floor is relaxed from entry_min_edge_pct to entry_unanimous_min_edge_pct.
+    # 7% floor accounts for ~2% Polymarket taker fee + ~2-3% slippage cushion.
+    "entry_unanimous_min_conviction":  0.97,   # ≥97% of ensemble members (~67/69)
+    "entry_unanimous_min_edge_pct":    0.07,   # relaxed floor when unanimous (vs 12% normal)
+    "kelly_max_bet_usdc_unanimous":   50.00,   # separate hard cap for unanimous-weak trades
+
     # ── Decision layer ────────────────────────────────────────────────────────
     "decision_max_open_positions":        20,   # max concurrent open trades (increase freely)
     "decision_max_exposure_pct":          0.9,   # max total balance % at risk across all open trades
