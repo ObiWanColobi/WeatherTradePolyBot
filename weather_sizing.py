@@ -34,10 +34,11 @@ from config import WEATHER
 
 
 # -- Config -------------------------------------------------------------------
-_KELLY_FRACTION  = WEATHER.get("kelly_fraction",        0.50)   # half-Kelly
-_MAX_BET_USDC    = WEATHER.get("kelly_max_bet_usdc",   50.00)   # hard cap per trade
-_MIN_BET_USDC    = WEATHER.get("kelly_min_bet_usdc",    5.00)   # ignore sub-threshold signals
-_MAX_BALANCE_PCT = WEATHER.get("kelly_max_balance_pct", 0.10)   # never risk >10% of balance
+_KELLY_FRACTION         = WEATHER.get("kelly_fraction",                 0.50)   # half-Kelly
+_MAX_BET_USDC           = WEATHER.get("kelly_max_bet_usdc",           200.00)   # hard cap per trade
+_MAX_BET_USDC_UNANIMOUS = WEATHER.get("kelly_max_bet_usdc_unanimous",  50.00)   # cap for unanimous-weak trades
+_MIN_BET_USDC           = WEATHER.get("kelly_min_bet_usdc",             5.00)   # ignore sub-threshold signals
+_MAX_BALANCE_PCT        = WEATHER.get("kelly_max_balance_pct",          0.10)   # never risk >10% of balance
 
 # Forecast horizon discount -- forecast reliability degrades with days to resolution
 _HORIZON_DISCOUNTS = {0: 1.00, 1: 0.85, 2: 0.65}
@@ -51,6 +52,7 @@ def kelly_size(
     direction:          str,
     ensemble_n:         int = 0,
     days_to_resolution: int = 0,
+    unanimous:          bool = False,
 ) -> float:
     """
     Calculate position size in USDC using fractional Kelly, clamped.
@@ -97,8 +99,9 @@ def kelly_size(
     fraction = kelly * _KELLY_FRACTION
     size     = fraction * balance
 
-    # Hard caps
-    size = min(size, _MAX_BET_USDC)
+    # Hard caps — unanimous-weak trades use a separate, smaller cap
+    cap  = _MAX_BET_USDC_UNANIMOUS if unanimous else _MAX_BET_USDC
+    size = min(size, cap)
     size = min(size, balance * _MAX_BALANCE_PCT)
     size = max(size, 0.0)
 
@@ -116,6 +119,7 @@ def size_summary(
     direction:          str,
     ensemble_n:         int = 0,
     days_to_resolution: int = 0,
+    unanimous:          bool = False,
 ) -> dict:
     """
     Return a dict of sizing diagnostics for logging/display.
@@ -134,7 +138,7 @@ def size_summary(
     kelly = (edge / odds) if odds > 0 and edge > 0 else 0.0
     horizon_mult = _HORIZON_DISCOUNTS.get(days_to_resolution, _HORIZON_DISCOUNT_DEFAULT)
 
-    size = kelly_size(balance, model_prob, market_price, direction, ensemble_n, days_to_resolution)
+    size = kelly_size(balance, model_prob, market_price, direction, ensemble_n, days_to_resolution, unanimous)
 
     return {
         "direction":       direction,
