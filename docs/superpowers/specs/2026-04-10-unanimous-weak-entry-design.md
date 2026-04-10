@@ -123,6 +123,27 @@ $50 until `kelly_max_bet_usdc_unanimous` is manually raised.
 
 ---
 
+## Interaction with Extended Positions (Legs)
+
+Extended position legs use their own edge gate (`net_edge >= 3%` in `weather_extended.py`), not
+the `weather_entry.py` edge check. So legs are already more permissive than initial entries —
+no change needed to the leg edge gate.
+
+**Sizing:** Legs should detect unanimity at check time and apply the unanimous cap when
+appropriate. The `unanimous` flag is re-derived from current ensemble data (not inherited from
+the parent), so any leg that fires at ≥97% conviction uses `kelly_max_bet_usdc_unanimous`.
+
+| Parent Entry | Leg Conviction at Check Time | Leg Cap Used |
+|---|---|---|
+| Normal (85% conv, large edge) | Normal (85%) | `kelly_max_bet_usdc` ($200) |
+| Normal (85% conv, large edge) | Rises to unanimous (97%+) | `kelly_max_bet_usdc_unanimous` ($50) |
+| Unanimous (97%+, weak edge) | Stays unanimous (97%+) | `kelly_max_bet_usdc_unanimous` ($50) |
+
+This means `weather_extended.py` must also read `kelly_max_bet_usdc_unanimous` from config and
+apply the same unanimous detection logic before calling `kelly_size()`.
+
+---
+
 ## Files Changed
 
 | File | Change |
@@ -131,6 +152,7 @@ $50 until `kelly_max_bet_usdc_unanimous` is manually raised.
 | `weather_entry.py` | Conviction-aware edge floor; `unanimous` flag in checks |
 | `weather_sizing.py` | `unanimous` param; apply separate cap |
 | `weather_decision.py` | Detect `unanimous` flag; pass to sizing; log tag |
+| `weather_extended.py` | Re-derive `unanimous` flag at leg check time; pass to sizing |
 
 ---
 
@@ -139,6 +161,7 @@ $50 until `kelly_max_bet_usdc_unanimous` is manually raised.
 - Dry-run bot pass: confirm trades that previously logged `edge too small` at ≥97% conviction now
   log `APPROVED [unanimous]`
 - Confirm normal trades (conviction 70–96%) are unaffected
-- Confirm trade size on unanimous entries is capped at `kelly_max_bet_usdc_unanimous`, not the
-  normal cap
+- Confirm trade size on unanimous initial entries is capped at `kelly_max_bet_usdc_unanimous`
+- Confirm leg on normal parent reaching unanimous conviction uses `kelly_max_bet_usdc_unanimous`
+- Confirm leg on normal parent staying at normal conviction uses `kelly_max_bet_usdc`
 - Confirm ensemble margin check still blocks unanimous trades where margin < 1.5°C
