@@ -145,6 +145,11 @@ WEATHER = {
     "live_kelly_max_bet_usdc_unanimous": 10.00,   # $10 cap for unanimous-weak
     "live_risk_daily_loss_limit_pct":    0.05,    # 5% daily loss limit (vs 15% paper)
     "live_risk_auto_reset":              False,   # no auto-reset — manual override only
+
+    # ── On-chain claim/redeem (live only) ────────────────────────────────────
+    "claim_retry_backoff_minutes":  [5, 30, 120, 480, 1440],  # 5min, 30min, 2hr, 8hr, 24hr
+    "claim_min_matic_balance":      0.01,                       # defer claims if MATIC below this
+    "polygon_rpc_url":              "https://polygon-rpc.com",  # Polygon JSON-RPC endpoint
 }
 
 # ── API Endpoints ─────────────────────────────────────────────────────────────

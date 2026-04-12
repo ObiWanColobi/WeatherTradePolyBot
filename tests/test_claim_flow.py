@@ -4,6 +4,16 @@ from unittest.mock import patch, MagicMock
 from datetime import datetime, timezone, timedelta
 
 
+def test_claim_config_keys_exist():
+    """Verify claim config keys are present in WEATHER dict."""
+    from config import WEATHER
+    assert "claim_retry_backoff_minutes" in WEATHER
+    assert "claim_min_matic_balance" in WEATHER
+    assert "polygon_rpc_url" in WEATHER
+    assert len(WEATHER["claim_retry_backoff_minutes"]) == 5
+    assert WEATHER["claim_retry_backoff_minutes"] == [5, 30, 120, 480, 1440]
+
+
 def test_claim_columns_exist():
     """Verify claim-related columns are added to trades table."""
     import db
