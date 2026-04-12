@@ -126,6 +126,90 @@ Consider whether the decision layer can auto-tune its own thresholds based on re
 
 ---
 
+---
+
+## Live Trading Migration — Phases
+
+### Phase 0 — Branch Strategy — COMPLETE (2026-04-12)
+
+- [x] Create `live` branch from `main` (main stays paper trading)
+- [x] Establish shared-core architecture: decision engine, forecast layer, risk logic, DB schema stay identical across branches
+- [x] Divergent files only: `executor/live.py`, `config.py` (live defaults), deployment scripts
+- [x] Define merge strategy: `main` → `live` cherry-picks for shared logic updates; `live` never merges back into `main`
+
+### Phase 1 — Live Executor + Wallet Management — COMPLETE (2026-04-12)
+
+Plan: `docs/superpowers/plans/2026-04-12-phase1-live-executor.md` (15 tasks)
+
+- [x] Uncomment `py-clob-client` in `requirements.txt` and verify installation
+- [x] Create `executor/live.py` implementing `BaseExecutor` interface
+  - [x] Order signing (ECDSA via py-clob-client)
+  - [x] Order submission (POST to CLOB `/order` — FOK orders)
+  - [x] Order status polling (fill confirmation, partial fills, rejections)
+  - [x] Order cancellation (stale/unfilled orders)
+  - [x] Fill price recording + slippage tracking (actual vs expected)
+  - [x] Fee accounting (deduct Polymarket fees from P&L)
+- [x] Wallet integration
+  - [x] Load private key from `.env`
+  - [x] Sync USDC balance from exchange on startup (replace DB-only balance)
+  - [x] Allowance/approval check (CLOB contract authorized to spend USDC)
+- [x] Position reconciliation on restart — balance sync implemented; full position import deferred to Phase 2
+- [x] Paper/live mode toggle — `TRADING_MODE=paper|live` in `.env` selects executor
+- [x] Allowance setup script — `scripts/setup_allowances.py` (one-time Polygon approval)
+- [x] Live deploy script — `deploy_live.sh` for PythonAnywhere
+- [x] 10 unit tests (all mocked, no real API calls) — all passing
+- [x] Promoted `place_extended_order`, `close_position`, `settle_resolved` to `BaseExecutor` interface
+- [x] Added `order_id`, `fee_usdc` columns to trades table + `set_balance()` DB function
+- [x] Live config overrides: $25 max bet, $10 unanimous cap, 5% daily loss limit, no auto-reset
+
+8 commits on `live` branch, pushed to GitHub.
+
+### Phase 2 — Market Resolution & Claiming Winnings — COMPLETE (2026-04-12)
+
+Spec: `docs/superpowers/specs/2026-04-12-phase2-claim-redeem-design.md`
+Plan: `docs/superpowers/plans/2026-04-12-phase2-claim-redeem.md` (10 tasks)
+
+- [x] On-chain claim/redeem — CTF `redeemPositions()` via web3.py (`chain/claimer.py`)
+- [x] Two-phase settlement — winning trades set `claim_pending`, balance deferred until on-chain confirmation
+- [x] Auto-claim on resolution — claims pass runs each bot loop after resolve pass
+- [x] Track claim state in DB — `claim_status`, `claim_tx_hash`, `claim_retries`, `claim_last_attempt`
+- [x] Retry with configurable backoff — [5m, 30m, 2hr, 8hr, 24hr], `claim_failed` after max retries
+- [x] Gas guard — MATIC balance check before claiming, defer if below threshold
+- [x] Account value includes `claim_pending` positions
+- [x] 16 unit tests (7 claimer + 9 claim flow) — all passing
+- [ ] Full lifecycle integration test (Task 9 — deferred to next session)
+- [ ] Push to GitHub
+
+### Phase 3 — Risk Recalibration for Real Money
+
+- [x] Tighten circuit breaker (15% paper → 5% live) — pre-configured in `live_risk_daily_loss_limit_pct`
+- [x] Reduce initial bet sizes ($25 max, $10 unanimous) — pre-configured in `live_kelly_max_bet_usdc`
+- [ ] Emergency kill switch — halt all trading + cancel all open orders instantly
+- [ ] Slippage kill-switch — if actual fill deviates >X% from expected, halt and alert
+- [ ] Order expiry / time-in-force — don't leave orders on book indefinitely
+- [ ] Nonce management (prevent wallet bricking from nonce collisions)
+
+### Phase 4 — Monitoring & Alerts for 24/7 Operation
+
+- [ ] Health heartbeat — periodic signal proving bot is alive (file touch, webhook, or HTTP ping)
+- [ ] Crash detection on restart — detect unclean shutdown, reconcile state, alert
+- [ ] Trade alerts — email/Discord/Telegram on every fill, exit, circuit breaker trip, error
+- [ ] API failure tracking — alert if Polymarket or Open-Meteo APIs start failing
+- [ ] Daily P&L digest — automated summary of positions, wins, losses
+- [ ] Rate limiting — proper throttling for CLOB API limits
+- [ ] Retry with exponential backoff for transient API failures
+
+### Phase 5 — Live Validation (Small Stakes)
+
+- [ ] Deploy to PythonAnywhere with $100-250 wallet
+- [ ] Validate order execution, fills, fee deductions end-to-end
+- [ ] Confirm balance reconciliation after restart
+- [ ] Confirm auto-claim works on first resolved market
+- [ ] Run for 1-2 weeks, review all trades manually
+- [ ] Gradually increase bet sizes once validated
+
+---
+
 ## Minor / Polish
 
 - [ ] Dashboard: add "last discovery run" timestamp + trader count to a sidebar stat
