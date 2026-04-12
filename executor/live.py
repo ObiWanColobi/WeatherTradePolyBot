@@ -516,9 +516,9 @@ class LiveExecutor(BaseExecutor):
         """
         Settle a trade at market resolution.
 
-        On-chain claiming of winnings is Phase 2 work. For now, this records
-        the resolution in the DB and updates the balance. Winning shares
-        pay $1.00 each, losing shares pay $0.00.
+        Losing trades: close immediately ($0 proceeds, no on-chain action).
+        Winning trades: record resolution metadata and set claim_pending.
+        Balance is NOT credited until the on-chain claim is confirmed.
         """
         direction = trade.get("direction", "YES").upper()
         won = (direction == "YES" and resolved_yes) or \
@@ -527,26 +527,46 @@ class LiveExecutor(BaseExecutor):
         close_price = 1.0 if resolved_yes else 0.0
 
         exit_price = 1.00 if won else 0.00
-        proceeds = trade["shares"] * exit_price
-
         cost = trade["size_usdc"]
+        proceeds = trade["shares"] * exit_price
         pnl = proceeds - cost
         pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
 
-        db.update_balance(proceeds)
-        db.update_trade(trade["id"], {
-            "exit_price":              exit_price,
-            "closed_at":               datetime.now(timezone.utc).isoformat(),
-            "status":                  "closed",
-            "pnl":                     pnl,
-            "pnl_pct":                 pnl_pct,
-            "exit_reason":             "resolved",
-            "actual_resolution":       actual,
-            "forecast_correct":        1 if won else 0,
-            "resolution_price":        close_price,
-            "hours_to_close_at_exit":  _hours_until(trade.get("end_date")),
-        })
-        db.record_account_value()
+        if won:
+            # Winning trade — defer balance credit until on-chain claim confirms
+            db.update_trade(trade["id"], {
+                "exit_price":              exit_price,
+                "status":                  "claim_pending",
+                "pnl":                     pnl,
+                "pnl_pct":                 pnl_pct,
+                "exit_reason":             "resolved",
+                "actual_resolution":       actual,
+                "forecast_correct":        1,
+                "resolution_price":        close_price,
+                "hours_to_close_at_exit":  _hours_until(trade.get("end_date")),
+                "claim_status":            "claim_pending",
+                "claim_retries":           0,
+            })
+            print(f"  [resolve] WIN   {trade['market_name'][:52]}")
+            print(f"            P&L: ${pnl:+.2f} ({pnl_pct:+.1f}%) — claim pending")
+        else:
+            # Losing trade — close immediately, no on-chain action needed
+            db.update_balance(0)  # $0 proceeds, but record the event
+            db.update_trade(trade["id"], {
+                "exit_price":              exit_price,
+                "closed_at":               datetime.now(timezone.utc).isoformat(),
+                "status":                  "closed",
+                "pnl":                     pnl,
+                "pnl_pct":                 pnl_pct,
+                "exit_reason":             "resolved",
+                "actual_resolution":       actual,
+                "forecast_correct":        0,
+                "resolution_price":        close_price,
+                "hours_to_close_at_exit":  _hours_until(trade.get("end_date")),
+            })
+            db.record_account_value()
+            print(f"  [resolve] LOSS  {trade['market_name'][:52]}")
+            print(f"            P&L: ${pnl:+.2f} ({pnl_pct:+.1f}%)")
 
         # Freeze tracked-trader positions for this resolved market
         city = (trade.get("city") or "").lower()
@@ -565,10 +585,6 @@ class LiveExecutor(BaseExecutor):
                     print(f"            froze {frozen} trader forecast(s) for {city} {end_date}")
             except Exception as e:
                 print(f"            [warn] freeze_trader_forecasts failed: {e}")
-
-        outcome = "WIN" if won else "LOSS"
-        print(f"  [resolve] {outcome}  {trade['market_name'][:52]}")
-        print(f"            P&L: ${pnl:+.2f} ({pnl_pct:+.1f}%)")
 
     # ── Position price refresh ───────────────────────────────────────────────
 

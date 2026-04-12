@@ -225,11 +225,14 @@ def test_settle_resolved_records_win(mock_db):
 
     mock_db.update_trade.assert_called_once()
     update = mock_db.update_trade.call_args[0][1]
-    assert update["status"] == "closed"
+    assert update["status"] == "claim_pending"
+    assert update["claim_status"] == "claim_pending"
     assert update["exit_price"] == 1.00
     assert update["actual_resolution"] == "YES"
     assert update["forecast_correct"] == 1
     assert update["pnl"] == 10.0  # 20 shares * $1.00 - $10.00 cost
+    # Balance NOT credited yet — deferred to claim confirmation
+    mock_db.update_balance.assert_not_called()
 
 
 @patch("executor.live.db")
