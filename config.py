@@ -3,6 +3,18 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ── Trading Mode ─────────────────────────────────────────────────────────────
+# "paper" = simulated fills using live order books (default)
+# "live"  = real orders via py-clob-client (requires WALLET_PRIVATE_KEY in .env)
+TRADING_MODE = os.getenv("TRADING_MODE", "paper")
+
+# ── Live Trading Wallet ──────────────────────────────────────────────────────
+WALLET_PRIVATE_KEY = os.getenv("WALLET_PRIVATE_KEY", "")
+# 0 = EOA (MetaMask/hardware), 1 = POLY_PROXY (Magic Link), 2 = GNOSIS_SAFE
+WALLET_SIGNATURE_TYPE = int(os.getenv("WALLET_SIGNATURE_TYPE", "0"))
+# Only needed for POLY_PROXY or GNOSIS_SAFE signature types
+WALLET_FUNDER_ADDRESS = os.getenv("WALLET_FUNDER_ADDRESS", "")
+
 # ── Paper Trading ─────────────────────────────────────────────────────────────
 PAPER_STARTING_BALANCE = 2000.00   # USDC
 
@@ -125,6 +137,14 @@ WEATHER = {
     "extended_positions_min_cooldown_hours": 12.0,  # minimum hours between any two legs
     "extended_positions_rejection_cooldown_hours": 1.0,  # cooldown after a rejected extend attempt (slippage/thin book)
     "extended_positions_min_net_edge":     0.05,  # minimum edge after slippage cost to bother extending (5%)
+
+    # ── Live trading overrides ───────────────────────────────────────────────
+    # These values are used ONLY when TRADING_MODE == "live".
+    # They override the paper defaults to be more conservative with real money.
+    "live_kelly_max_bet_usdc":          25.00,    # start small — $25 max per trade
+    "live_kelly_max_bet_usdc_unanimous": 10.00,   # $10 cap for unanimous-weak
+    "live_risk_daily_loss_limit_pct":    0.05,    # 5% daily loss limit (vs 15% paper)
+    "live_risk_auto_reset":              False,   # no auto-reset — manual override only
 }
 
 # ── API Endpoints ─────────────────────────────────────────────────────────────
