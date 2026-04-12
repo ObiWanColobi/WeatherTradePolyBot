@@ -16,6 +16,19 @@ class BaseExecutor(ABC):
         """Close an entire open position."""
 
     @abstractmethod
+    def place_extended_order(self, market: dict, direction: str, size_usdc: float,
+                              estimate: dict, parent_trade_id: int, leg_number: int):
+        """Place an add-on leg for an existing extended position."""
+
+    @abstractmethod
+    def close_position(self, trade: dict, reason: str):
+        """Close all legs of an extended position (or a single trade)."""
+
+    @abstractmethod
+    def settle_resolved(self, trade: dict, resolved_yes: bool):
+        """Settle a trade at market resolution."""
+
+    @abstractmethod
     def update_open_positions(self):
         """Refresh current_price and peak_price for all open positions."""
 
