@@ -238,3 +238,65 @@ def test_process_pending_claims_defers_on_low_matic(mock_db):
     mock_claimer.claim_winnings.assert_not_called()
     mock_db.update_trade.assert_not_called()
     mock_db.update_balance.assert_not_called()
+
+
+# ── Account value includes claim_pending ────────────────────────────────────
+
+
+def test_get_open_trades_excludes_claim_pending():
+    """claim_pending trades should NOT appear in get_open_trades (no re-resolution)."""
+    import db
+    db.init_db()
+
+    trade = {
+        "market_id": "test-claim-exclude",
+        "market_name": "Test Claim Exclude",
+        "direction": "YES",
+        "size_usdc": 10.0,
+        "shares": 20.0,
+        "entry_price": 0.50,
+        "fill_price": 0.50,
+        "opened_at": "2026-04-10T00:00:00",
+        "status": "claim_pending",
+    }
+    db.insert_trade(trade)
+
+    open_trades = db.get_open_trades()
+    claim_pending_ids = [t["market_id"] for t in open_trades if t["market_id"] == "test-claim-exclude"]
+    assert len(claim_pending_ids) == 0, "claim_pending trades should not appear in get_open_trades"
+
+    with db.get_conn() as conn:
+        conn.execute("DELETE FROM trades WHERE market_id = 'test-claim-exclude'")
+
+
+def test_record_account_value_includes_claim_pending():
+    """Account value should include claim_pending positions."""
+    import db
+    db.init_db()
+
+    # Get baseline: current account value without our test trade
+    balance_before = db.get_balance()
+
+    trade = {
+        "market_id": "test-acct-val",
+        "market_name": "Test Account Value",
+        "direction": "YES",
+        "size_usdc": 10.0,
+        "shares": 20.0,
+        "entry_price": 0.50,
+        "fill_price": 0.50,
+        "current_price": 1.00,
+        "opened_at": "2026-04-10T00:00:00",
+        "status": "claim_pending",
+    }
+    tid = db.insert_trade(trade)
+
+    db.record_account_value()
+
+    history = db.get_balance_history()
+    latest = history[-1]["amount"]
+    # Should include the claim_pending position: 20 shares * $1.00 = +$20
+    assert latest >= balance_before + 20.0 - 0.01
+
+    with db.get_conn() as conn:
+        conn.execute("DELETE FROM trades WHERE id = ?", (tid,))
