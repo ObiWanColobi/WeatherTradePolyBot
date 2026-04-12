@@ -188,6 +188,8 @@ def init_db():
         _safe_add_column(conn, "trades", "resolution_attempts",     "INTEGER")  # no_data/404 hit count; stop retrying at threshold
         _safe_add_column(conn, "trades", "parent_trade_id",  "INTEGER")
         _safe_add_column(conn, "trades", "leg_number",       "INTEGER DEFAULT 1")
+        _safe_add_column(conn, "trades", "order_id",  "TEXT")      # CLOB order ID (live trades only)
+        _safe_add_column(conn, "trades", "fee_usdc",  "REAL")      # Polymarket fees deducted from fill
 
         # Backfill hours_to_close for trades that predate this column
         conn.executescript("""
@@ -227,6 +229,16 @@ def update_balance(delta: float):
         conn.execute(
             "UPDATE balance SET amount = amount + ?, updated_at = ? WHERE id = 1",
             (delta, now),
+        )
+
+
+def set_balance(amount: float):
+    """Set the balance to an exact value (used for exchange sync)."""
+    with get_conn() as conn:
+        now = datetime.utcnow().isoformat()
+        conn.execute(
+            "UPDATE balance SET amount = ?, updated_at = ? WHERE id = 1",
+            (amount, now),
         )
 
 
