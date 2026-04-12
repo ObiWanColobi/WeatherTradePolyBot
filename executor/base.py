@@ -40,3 +40,12 @@ class BaseExecutor(ABC):
         Live mode:   query the exchange for open positions, import any that
                      are not already tracked in the DB so the bot can manage them.
         """
+
+    def process_pending_claims(self):
+        """
+        Process on-chain claims for resolved winning trades.
+
+        Paper mode:  no-op — balance is credited immediately at resolution.
+        Live mode:   submits CTF redeemPositions() transactions and polls
+                     for confirmation before crediting the DB balance.
+        """
