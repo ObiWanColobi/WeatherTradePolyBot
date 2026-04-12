@@ -18,10 +18,9 @@ import time
 from datetime import datetime, timezone
 
 import db
-from config import WEATHER, PAPER_STARTING_BALANCE
+from config import WEATHER, PAPER_STARTING_BALANCE, TRADING_MODE
 from weather_risk import RiskManager, RiskState
 from layers.layer3_weather import WeatherLayer
-from executor.paper import PaperExecutor
 from executor.weather_exit import check_weather_exit
 from weather_scanner import run_scan
 from weather_decision import evaluate, print_audit
@@ -37,8 +36,19 @@ DEFAULT_MAX_BET        = WEATHER.get("kelly_max_bet_usdc",         50.00)
 TRADER_MONITOR_EVERY_N = WEATHER.get("trader_monitor_poll_every_n", 10)
 
 _layer        = WeatherLayer()
-_executor     = PaperExecutor()
 _risk_manager: RiskManager | None = None
+
+
+def _create_executor():
+    if TRADING_MODE == "live":
+        from executor.live import LiveExecutor
+        return LiveExecutor()
+    else:
+        from executor.paper import PaperExecutor
+        return PaperExecutor()
+
+
+_executor = _create_executor()
 
 
 # -- Startup prompt -----------------------------------------------------------
@@ -441,9 +451,19 @@ def run(dry_run: bool = False):
     global _risk_manager
     _risk_manager = RiskManager()
     _risk_manager.startup_cleanup()
-    _prompt_startup()
 
-    print("[bot] Weather Trading Bot — paper mode")
+    # Apply live-mode config overrides
+    if TRADING_MODE == "live":
+        WEATHER["kelly_max_bet_usdc"] = WEATHER.get("live_kelly_max_bet_usdc", 25.0)
+        WEATHER["kelly_max_bet_usdc_unanimous"] = WEATHER.get("live_kelly_max_bet_usdc_unanimous", 10.0)
+        WEATHER["risk_daily_loss_limit_pct"] = WEATHER.get("live_risk_daily_loss_limit_pct", 0.05)
+        WEATHER["risk_auto_reset"] = WEATHER.get("live_risk_auto_reset", False)
+        print("[bot] Live mode — skipping session reset prompt.")
+    else:
+        _prompt_startup()
+
+    mode_label = "LIVE" if TRADING_MODE == "live" else "paper"
+    print(f"[bot] Weather Trading Bot — {mode_label} mode")
     print(f"      Poll interval : {POLL_INTERVAL}s")
     if dry_run:
         print("      Mode          : DRY RUN (no orders will be placed)")
@@ -456,6 +476,9 @@ def run(dry_run: bool = False):
         _calibration.startup()
     except Exception as e:
         print(f"[bot] Calibration startup pass failed (non-fatal): {e}\n")
+
+    # Reconcile positions with exchange on startup
+    _executor.reconcile_positions()
 
     # Catalog snapshot on startup
     print("[bot] Running catalog snapshot...")
@@ -554,7 +577,7 @@ def run(dry_run: bool = False):
 # -- Entry point --------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Weather trading bot (paper mode)")
+    parser = argparse.ArgumentParser(description="Weather trading bot")
     parser.add_argument("--dry-run", action="store_true",
                         help="Evaluate trades but do not place any orders")
     args = parser.parse_args()
