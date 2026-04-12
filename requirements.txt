@@ -5,4 +5,5 @@ pandas>=2.0.0
 plotly>=5.17.0
 python-dotenv>=1.0.0
 rich>=13.0.0
-# py-clob-client>=0.17.0  # uncomment when switching to live trading
+py-clob-client>=0.17.0
+web3>=6.14.0
