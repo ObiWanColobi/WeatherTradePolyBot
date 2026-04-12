@@ -190,6 +190,10 @@ def init_db():
         _safe_add_column(conn, "trades", "leg_number",       "INTEGER DEFAULT 1")
         _safe_add_column(conn, "trades", "order_id",  "TEXT")      # CLOB order ID (live trades only)
         _safe_add_column(conn, "trades", "fee_usdc",  "REAL")      # Polymarket fees deducted from fill
+        _safe_add_column(conn, "trades", "claim_status",       "TEXT")              # claim_pending | claim_confirmed | claim_failed
+        _safe_add_column(conn, "trades", "claim_tx_hash",      "TEXT")              # Polygon tx hash
+        _safe_add_column(conn, "trades", "claim_retries",      "INTEGER DEFAULT 0") # retry count
+        _safe_add_column(conn, "trades", "claim_last_attempt", "TEXT")              # ISO timestamp of last attempt
 
         # Backfill hours_to_close for trades that predate this column
         conn.executescript("""
@@ -343,6 +347,15 @@ def get_trades_today() -> int:
             (today,),
         ).fetchone()
         return row["cnt"] if row else 0
+
+
+def get_pending_claims() -> list[dict]:
+    """Return all trades with claim_status = 'claim_pending'."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM trades WHERE claim_status = 'claim_pending' ORDER BY id ASC"
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def get_open_position_count() -> int:
