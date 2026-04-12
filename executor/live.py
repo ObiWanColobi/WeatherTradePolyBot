@@ -14,6 +14,7 @@ from py_clob_client.clob_types import (
 from py_clob_client.order_builder.constants import BUY, SELL
 
 from executor.base import BaseExecutor
+from chain.claimer import Claimer
 from config import (
     POLYMARKET_CLOB_API, WALLET_PRIVATE_KEY,
     WALLET_SIGNATURE_TYPE, WALLET_FUNDER_ADDRESS, WEATHER,
@@ -37,12 +38,22 @@ class LiveExecutor(BaseExecutor):
 
     def __init__(self):
         self._client: ClobClient | None = None
+        self._claimer: Claimer | None = None
         self._init_client(
             WALLET_PRIVATE_KEY,
             137,  # Polygon mainnet
             WALLET_SIGNATURE_TYPE,
             WALLET_FUNDER_ADDRESS,
         )
+
+        # Initialize on-chain claimer for CTF redemption
+        rpc_url = WEATHER.get("polygon_rpc_url", "https://polygon-rpc.com")
+        try:
+            self._claimer = Claimer(rpc_url=rpc_url, private_key=WALLET_PRIVATE_KEY)
+            print(f"[live] On-chain claimer initialized (RPC: {rpc_url})")
+        except Exception as e:
+            print(f"[live] WARNING: Claimer init failed ({e}) — claims will be deferred")
+            self._claimer = None
 
     # ── Client initialization ────────────────────────────────────────────────
 
@@ -585,6 +596,125 @@ class LiveExecutor(BaseExecutor):
                     print(f"            froze {frozen} trader forecast(s) for {city} {end_date}")
             except Exception as e:
                 print(f"            [warn] freeze_trader_forecasts failed: {e}")
+
+    # ── On-chain claim processing ──────────────────────────────────────────
+
+    def process_pending_claims(self):
+        """
+        Process on-chain claims for resolved winning trades.
+
+        Checks all trades with claim_status='claim_pending', respects backoff
+        schedule, submits CTF redeemPositions(), and credits balance on confirmation.
+        """
+        if self._claimer is None:
+            return
+
+        pending = db.get_pending_claims()
+        if not pending:
+            return
+
+        backoff = WEATHER.get("claim_retry_backoff_minutes", [5, 30, 120, 480, 1440])
+        min_matic = WEATHER.get("claim_min_matic_balance", 0.01)
+
+        # Gas guard — check once for all pending claims
+        try:
+            matic_balance = self._claimer.get_matic_balance()
+        except Exception as e:
+            print(f"[claims] MATIC balance check failed: {e}")
+            return
+
+        if matic_balance < min_matic:
+            print(f"[claims] Low MATIC ({matic_balance:.4f}) — deferring {len(pending)} claim(s)")
+            return
+
+        now = datetime.now(timezone.utc)
+
+        for trade in pending:
+            retries = trade.get("claim_retries") or 0
+            last_attempt = trade.get("claim_last_attempt")
+
+            # Check if max retries exceeded (retries > len = exhausted all backoff slots)
+            if retries > len(backoff):
+                db.update_trade(trade["id"], {"claim_status": "claim_failed"})
+                print(f"[claims] FAILED (max retries) — trade #{trade['id']} "
+                      f"{trade['market_name'][:40]}")
+                continue
+
+            # Check backoff timing
+            if last_attempt and retries > 0:
+                try:
+                    last = datetime.fromisoformat(last_attempt.replace("Z", "+00:00"))
+                    if last.tzinfo is None:
+                        last = last.replace(tzinfo=timezone.utc)
+                    wait_minutes = backoff[retries - 1] if retries <= len(backoff) else backoff[-1]
+                    if (now - last).total_seconds() < wait_minutes * 60:
+                        continue  # still in backoff window
+                except Exception:
+                    pass  # unparseable timestamp — proceed with claim
+
+            # Determine index set: [1] for YES tokens, [2] for NO tokens
+            direction = (trade.get("direction") or "YES").upper()
+            index_sets = [1] if direction == "YES" else [2]
+
+            market_id = trade.get("market_id", "")
+            print(f"[claims] Attempting claim for trade #{trade['id']}  "
+                  f"{trade['market_name'][:40]}...")
+
+            tx_hash = self._claimer.claim_winnings(
+                condition_id=market_id,
+                index_sets=index_sets,
+            )
+
+            if tx_hash is None:
+                # Submission failed — consume retry
+                db.update_trade(trade["id"], {
+                    "claim_retries": retries + 1,
+                    "claim_last_attempt": now.isoformat(),
+                    "claim_status": "claim_pending",
+                })
+                print(f"[claims] Claim tx failed for trade #{trade['id']} "
+                      f"(retry {retries + 1}/{len(backoff)})")
+                continue
+
+            # Poll for confirmation (up to 30s)
+            status = "pending"
+            for _ in range(15):
+                status = self._claimer.check_tx_status(tx_hash)
+                if status != "pending":
+                    break
+                time.sleep(2)
+
+            if status == "confirmed":
+                proceeds = trade["shares"] * 1.0  # winning shares = $1.00 each
+                db.update_balance(proceeds)
+                db.update_trade(trade["id"], {
+                    "status": "closed",
+                    "closed_at": now.isoformat(),
+                    "claim_status": "claim_confirmed",
+                    "claim_tx_hash": tx_hash,
+                })
+                db.record_account_value()
+                print(f"[claims] CONFIRMED — trade #{trade['id']}  "
+                      f"+${proceeds:.2f}  tx={tx_hash[:16]}...")
+            elif status == "failed":
+                # Tx was mined but reverted — consume retry
+                db.update_trade(trade["id"], {
+                    "claim_retries": retries + 1,
+                    "claim_last_attempt": now.isoformat(),
+                    "claim_tx_hash": tx_hash,
+                    "claim_status": "claim_pending",
+                })
+                print(f"[claims] Tx reverted for trade #{trade['id']}  "
+                      f"tx={tx_hash[:16]}... (retry {retries + 1}/{len(backoff)})")
+            else:
+                # Still pending after 30s — record tx hash, don't consume retry,
+                # next cycle will re-check
+                db.update_trade(trade["id"], {
+                    "claim_tx_hash": tx_hash,
+                    "claim_last_attempt": now.isoformat(),
+                })
+                print(f"[claims] Tx pending for trade #{trade['id']}  "
+                      f"tx={tx_hash[:16]}... (will re-check)")
 
     # ── Position price refresh ───────────────────────────────────────────────
 
