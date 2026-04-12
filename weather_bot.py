@@ -540,6 +540,12 @@ def run(dry_run: bool = False):
                     if mid not in open_mids:
                         _risk_manager.clear_resolved(mid)
 
+        # Claims pass — process on-chain claims for winning live trades
+        try:
+            _executor.process_pending_claims()
+        except Exception as e:
+            print(f"[claims] process_pending_claims error (non-fatal): {e}")
+
         # Risk check — portfolio-level circuit breaker
         risk_state = _risk_manager.check()
 
