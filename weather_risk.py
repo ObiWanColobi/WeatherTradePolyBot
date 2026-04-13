@@ -19,6 +19,7 @@ from pathlib import Path
 
 import db
 from config import WEATHER
+from notifications import notify
 
 # ── File paths for cross-process IPC ─────────────────────────────────────────
 _DATA_DIR = Path(__file__).parent
@@ -69,6 +70,7 @@ class RiskManager:
                 print("[risk] Midnight reset — circuit breaker cleared.")
                 self.send_alert("circuit_breaker_reset",
                                 "Circuit breaker auto-reset at midnight. Entries resumed.")
+                notify("warning", "Circuit Breaker Reset", "Daily loss counter reset at UTC midnight.")
 
         # Check for dashboard override
         if self._state == RiskState.HALTED and self.is_overridden():
@@ -124,6 +126,10 @@ class RiskManager:
                     f"Open positions: {len(open_trades)}\n"
                     f"Cash: ${balance:.2f}",
                 )
+                notify("critical", "Circuit Breaker Tripped",
+                       f"Daily loss {loss_pct:.1%} exceeded {limit_pct:.1%} limit. Entries halted.",
+                       fields={"Loss": f"${self._today_losses:.2f}",
+                               "Account": f"${account_value:.2f}"})
                 self._alert_sent_today = today_utc
 
         return self._state
