@@ -25,6 +25,7 @@ import db
 from config import WEATHER, PAPER_STARTING_BALANCE, TRADING_MODE
 from weather_risk import RiskManager
 from executor import create_executor
+from notifications import notify
 
 
 @st.cache_resource
@@ -200,6 +201,9 @@ with st.sidebar:
                             f"Closed {len(closed_ids)} positions:\n" +
                             "\n".join(f"  - {name}" for name in closed_ids),
                         )
+                        notify("critical", "Manual Close All",
+                               "All positions closed manually.",
+                               fields={"Positions Closed": str(len(closed_ids))})
                         st.session_state.confirm_close_all = False
                         st.success(f"Closed {len(closed_ids)} positions.")
                         time.sleep(1)
