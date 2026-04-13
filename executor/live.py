@@ -26,6 +26,9 @@ import db
 # Polymarket uses USDC with 6 decimals on Polygon
 _USDC_DECIMALS = 1_000_000
 
+# Polygon mainnet chain ID (module-level so tests can patch it)
+CHAIN_ID = 137
+
 
 class LiveExecutor(BaseExecutor):
     """
@@ -39,9 +42,10 @@ class LiveExecutor(BaseExecutor):
     def __init__(self):
         self._client: ClobClient | None = None
         self._claimer: Claimer | None = None
+        self._last_clob_call_ts: float = 0.0
         self._init_client(
             WALLET_PRIVATE_KEY,
-            137,  # Polygon mainnet
+            CHAIN_ID,
             WALLET_SIGNATURE_TYPE,
             WALLET_FUNDER_ADDRESS,
         )
@@ -96,9 +100,19 @@ class LiveExecutor(BaseExecutor):
 
     # ── CLOB order helpers ───────────────────────────────────────────────────
 
+    def _throttle_clob(self) -> None:
+        """Enforce minimum delay between CLOB API calls."""
+        delay = WEATHER.get("clob_inter_request_delay", 0.3)
+        last_ts = getattr(self, "_last_clob_call_ts", 0.0)
+        elapsed = time.time() - last_ts
+        if elapsed < delay:
+            time.sleep(delay - elapsed)
+        self._last_clob_call_ts = time.time()
+
     def _post_order(self, token_id: str, price: float, size: float,
                     side: str) -> dict | None:
         """Sign and post an order to the CLOB. Returns response dict or None."""
+        self._throttle_clob()
         clob_side = BUY if side == "BUY" else SELL
 
         order_args = OrderArgs(
@@ -128,6 +142,7 @@ class LiveExecutor(BaseExecutor):
         """
         for attempt in range(5):
             try:
+                self._throttle_clob()
                 order = self._client.get_order(order_id)
                 status = order.get("status", "")
 
