@@ -264,6 +264,22 @@ trades_today  = sum(1 for t in all_trades if (t.get("opened_at") or "").startswi
 st.title("🌤️ Weather Trading Bot — Paper Mode")
 st.caption(f"Auto-refreshes every {REFRESH_INTERVAL}s · last loaded {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
 
+# ── Bot status banner ─────────────────────────────────────────────────────────
+
+import os as _os
+import health as _health
+
+_heartbeat_path = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "heartbeat.json")
+_bot_status = _health.get_bot_status(
+    _heartbeat_path,
+    down_threshold=WEATHER.get("dashboard_bot_down_threshold", 180),
+)
+if not _bot_status["running"]:
+    if _bot_status.get("no_file"):
+        st.warning("**Bot status unknown** — no heartbeat file found.")
+    else:
+        st.error(f"**Bot offline** — last seen {_bot_status['minutes_ago']} minutes ago.")
+
 # ── Risk banner ──────────────────────────────────────────────────────────────
 
 _risk_status = _risk_mgr.get_status_display()
@@ -308,6 +324,26 @@ if _risk_status["state"] == "HALTED" and not _risk_status["overridden"]:
                 if st.button("❌ Cancel Override"):
                     st.session_state.confirm_override = False
                     st.rerun()
+
+# ── Notification Feed ─────────────────────────────────────────────────────────
+
+if "dismissed_before" not in st.session_state:
+    st.session_state.dismissed_before = None
+
+_notif_rows = db.get_notifications(
+    severity_in=["critical", "warning"],
+    limit=20,
+    since=st.session_state.dismissed_before,
+)
+if _notif_rows:
+    with st.expander(f"⚠️ Alerts ({len(_notif_rows)})", expanded=True):
+        if st.button("Dismiss All"):
+            st.session_state.dismissed_before = datetime.now(timezone.utc).isoformat()
+            st.rerun()
+        for row in _notif_rows:
+            icon = "🔴" if row["severity"] == "critical" else "🟡"
+            ts_short = row["timestamp"][:19].replace("T", " ")
+            st.markdown(f"{icon} **{ts_short}** — {row['title']}: {row['message']}")
 
 # ── Top metrics ───────────────────────────────────────────────────────────────
 

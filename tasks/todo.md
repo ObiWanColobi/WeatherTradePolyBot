@@ -189,15 +189,22 @@ Plan: `docs/superpowers/plans/2026-04-12-phase2-claim-redeem.md` (10 tasks)
 - [ ] Order expiry / time-in-force — don't leave orders on book indefinitely
 - [ ] Nonce management (prevent wallet bricking from nonce collisions)
 
-### Phase 4 — Monitoring & Alerts for 24/7 Operation
+### Phase 4 — Monitoring & Alerts for 24/7 Operation — COMPLETE (2026-04-12)
 
-- [ ] Health heartbeat — periodic signal proving bot is alive (file touch, webhook, or HTTP ping)
-- [ ] Crash detection on restart — detect unclean shutdown, reconcile state, alert
-- [ ] Trade alerts — email/Discord/Telegram on every fill, exit, circuit breaker trip, error
-- [ ] API failure tracking — alert if Polymarket or Open-Meteo APIs start failing
-- [ ] Daily P&L digest — automated summary of positions, wins, losses
-- [ ] Rate limiting — proper throttling for CLOB API limits
-- [ ] Retry with exponential backoff for transient API failures
+Spec: `docs/superpowers/specs/2026-04-12-phase4-monitoring-alerts-design.md`
+Plan: `docs/superpowers/plans/2026-04-12-phase4-monitoring-alerts.md` (14 tasks)
+
+- [x] Discord webhook notifications (dual channel: #bot-alerts + #bot-trades)
+- [x] Health heartbeat + crash detection on restart
+- [x] Dashboard bot-down banner + notification feed panel
+- [x] Shared API circuit breaker with escalating cooldowns
+- [x] CLOB rate limiting (300ms delay floor)
+- [x] Open-Meteo circuit breaker migrated to shared module
+- [x] Daily P&L digest (UTC day rollover)
+- [x] Trade alerts (fills, exits, claims)
+- [x] Risk event alerts (circuit breaker, close-all)
+- [x] API failure alerts (breaker trips, non-retriable errors, gas low)
+- [x] CLOB API calls wrapped with circuit breaker
 
 ### Phase 5 — Live Validation (Small Stakes)
 

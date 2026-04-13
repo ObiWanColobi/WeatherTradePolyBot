@@ -2,6 +2,7 @@
 
 import time
 from config import WEATHER
+from notifications import notify
 
 
 class NonRetriableError(Exception):
@@ -49,6 +50,9 @@ class CircuitBreaker:
         self._fail_count = 0
         if self._is_open:
             # Recovery from HALF_OPEN
+            notify("warning", f"{self.name} API Recovered",
+                   "Circuit breaker closed after recovery.",
+                   fields={"Breaker": self.name})
             self._is_open = False
             self._trip_count = 0
             print(f"[api_monitor] {self.name} circuit breaker recovered")
@@ -80,6 +84,12 @@ class CircuitBreaker:
             f"[api_monitor] {self.name} circuit breaker tripped "
             f"(trip #{self._trip_count}, cooldown {self._current_cooldown}s)"
         )
+        notify("warning", f"{self.name} API Circuit Breaker Tripped",
+               f"{self._trip_count} consecutive trip(s). "
+               f"Cooldown: {self._current_cooldown}s.",
+               fields={"Breaker": self.name,
+                        "Trip #": str(self._trip_count),
+                        "Cooldown": f"{self._current_cooldown}s"})
 
     def call(self, fn, *args, **kwargs):
         """Execute fn through the circuit breaker.
@@ -96,7 +106,10 @@ class CircuitBreaker:
             result = fn(*args, **kwargs)
             self.record_success()
             return result
-        except NonRetriableError:
+        except NonRetriableError as e:
+            notify("critical", f"{self.name} Non-Retriable Error",
+                   str(e),
+                   fields={"Breaker": self.name, "Error": str(e)})
             raise  # propagate immediately, don't affect breaker
         except Exception:
             self.record_failure(retriable=True)

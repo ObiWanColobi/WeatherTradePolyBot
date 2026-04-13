@@ -14,11 +14,14 @@ Usage:
     python weather_bot.py --dry-run  # scan + evaluate but never place orders
 """
 import argparse
+import os
 import time
 from datetime import datetime, timezone
 
 import db
+import health
 from config import WEATHER, PAPER_STARTING_BALANCE, TRADING_MODE
+from notifications import notify
 from weather_risk import RiskManager, RiskState
 from layers.layer3_weather import WeatherLayer
 from executor.weather_exit import check_weather_exit
@@ -379,6 +382,35 @@ def run_extended_positions_pass(dry_run: bool = False):
 
 
 
+_last_digest_date: str = ""
+
+
+def _send_daily_digest(date_str: str) -> None:
+    """Compile and send daily P&L digest for the given UTC date."""
+    balance = db.get_balance()
+    closed_today = [t for t in db.get_closed_trades()
+                    if t.get("closed_at", "").startswith(date_str)]
+    opened_today = [t for t in db.get_open_trades()
+                    if t.get("created_at", "").startswith(date_str)]
+
+    realized_pnl = sum(t.get("pnl", 0) or 0 for t in closed_today)
+    wins = sum(1 for t in closed_today if (t.get("pnl", 0) or 0) > 0)
+    losses = len(closed_today) - wins
+    open_count = len(db.get_open_trades())
+
+    notify("info", f"Daily Digest — {date_str}",
+           f"End-of-day summary for {date_str}",
+           fields={
+               "Balance": f"${balance:.2f}",
+               "Realized P&L": f"${realized_pnl:+.2f}",
+               "Opened": str(len(opened_today)),
+               "Closed": str(len(closed_today)),
+               "Win/Loss": f"{wins}W-{losses}L",
+               "Open Positions": str(open_count),
+           })
+    print(f"[bot] Daily digest sent for {date_str}")
+
+
 # -- Main loop ----------------------------------------------------------------
 
 def _prompt_startup() -> bool:
@@ -472,6 +504,20 @@ def run(dry_run: bool = False):
 
     # Reconcile positions with exchange on startup
     _executor.reconcile_positions()
+
+    # Crash detection
+    _heartbeat_path = os.path.join(os.path.dirname(__file__), "heartbeat.json")
+    crash_info = health.check_crash(
+        _heartbeat_path,
+        stale_threshold=WEATHER.get("heartbeat_stale_threshold", 300),
+    )
+    if crash_info:
+        notify("critical", "Bot Restarted After Crash",
+               f"Last heartbeat was {crash_info['minutes_ago']} minutes ago. "
+               f"Poll count at crash: {crash_info['poll_count']}. "
+               f"Open positions: {crash_info['open_positions']}.",
+               fields={"Last Seen": crash_info["last_timestamp"],
+                        "Balance at Crash": f"${crash_info['balance']:.2f}"})
 
     # Catalog snapshot on startup
     print("[bot] Running catalog snapshot...")
@@ -569,6 +615,21 @@ def run(dry_run: bool = False):
 
         # Snapshot open trades at end of poll for external-close detection next poll
         _prev_open_map = {t["id"]: t for t in db.get_open_trades()}
+
+        # Heartbeat
+        health.write_heartbeat(
+            _heartbeat_path,
+            poll_count=poll,
+            open_positions=len(_prev_open_map),
+            balance=db.get_balance(),
+        )
+
+        # Daily digest — fires once after UTC date rolls over
+        global _last_digest_date
+        today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if _last_digest_date and _last_digest_date != today_utc:
+            _send_daily_digest(_last_digest_date)
+        _last_digest_date = today_utc
 
         time.sleep(POLL_INTERVAL)
 

@@ -19,6 +19,8 @@ from config import (
     POLYMARKET_CLOB_API, WALLET_PRIVATE_KEY,
     WALLET_SIGNATURE_TYPE, WALLET_FUNDER_ADDRESS, WEATHER,
 )
+from notifications import notify, COLOR_GREEN
+import api_monitor
 import markets.polymarket as polymarket
 import db
 
@@ -122,15 +124,14 @@ class LiveExecutor(BaseExecutor):
             side=clob_side,
         )
 
-        try:
+        def _do_post():
             signed = self._client.create_order(order_args)
             response = self._client.post_order(signed, OrderType.FOK)
             print(f"[live] Order posted: {response.get('orderID', '?')[:12]}  "
                   f"status={response.get('status', '?')}")
             return response
-        except Exception as e:
-            print(f"[live] Order post failed: {e}")
-            return None
+
+        return api_monitor.call("clob", _do_post)
 
     def _confirm_fill(self, order_id: str, token_id: str,
                       expected_price: float) -> tuple[float, float, float]:
@@ -316,6 +317,13 @@ class LiveExecutor(BaseExecutor):
         print(f"             Size: ${filled_usdc:.2f}  Fill: {fill_price:.4f}  "
               f"Slippage: {slippage:.4f}  Edge: {edge_display:+.3f}  Fee: ${fee:.2f}")
 
+        notify("info", "Order Filled",
+               f"Bought {direction} on {market.get('question', '')[:60]}",
+               fields={"Price": f"${fill_price:.4f}",
+                        "Size": f"${filled_usdc:.2f}",
+                        "Shares": f"{filled_shares:.1f}"},
+               color=COLOR_GREEN)
+
     # ── Extended position add-on ─────────────────────────────────────────────
 
     def place_extended_order(self, market: dict, direction: str, size_usdc: float,
@@ -474,6 +482,12 @@ class LiveExecutor(BaseExecutor):
 
         print(f"[live] CLOSE {trade['market_name'][:55]}")
         print(f"             Reason: {reason}  P&L: ${pnl:+.2f} ({pnl_pct:+.1f}%)  Fee: ${fee:.2f}")
+
+        notify("info", "Position Closed",
+               f"Exited {trade.get('market_name', 'unknown')[:60]} — {reason}",
+               fields={"P&L": f"${pnl:+.2f}",
+                        "Reason": reason},
+               color=COLOR_GREEN)
 
     def close_partial(self, trade: dict, sell_pct: float, reason: str):
         """Sell a fraction of shares. If remainder is tiny, close fully."""
@@ -639,6 +653,10 @@ class LiveExecutor(BaseExecutor):
             return
 
         if matic_balance < min_matic:
+            notify("warning", "Gas Too Low",
+                   f"MATIC balance {matic_balance:.4f} below threshold. "
+                   f"Deferring {len(pending)} claim(s).",
+                   fields={"MATIC": f"{matic_balance:.4f}"})
             print(f"[claims] Low MATIC ({matic_balance:.4f}) — deferring {len(pending)} claim(s)")
             return
 
@@ -709,6 +727,11 @@ class LiveExecutor(BaseExecutor):
                     "claim_tx_hash": tx_hash,
                 })
                 db.record_account_value()
+                notify("info", "Claim Completed",
+                       f"Redeemed {trade.get('market_name', 'unknown')[:60]}",
+                       fields={"Amount": f"${proceeds:.2f}",
+                                "Market": trade.get("market_name", "")[:60]},
+                       color=COLOR_GREEN)
                 print(f"[claims] CONFIRMED — trade #{trade['id']}  "
                       f"+${proceeds:.2f}  tx={tx_hash[:16]}...")
             elif status == "failed":

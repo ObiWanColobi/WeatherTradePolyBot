@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from executor.base import BaseExecutor
+from notifications import notify, COLOR_GREEN
 import markets.polymarket as polymarket
 import db
 from config import WEATHER
@@ -116,6 +117,13 @@ class PaperExecutor(BaseExecutor):
         print(f"[paper] OPEN  {direction:3s}  {market['question'][:55]}")
         print(f"              Size: ${filled_usdc:.2f}  Fill: {fill_price:.4f}  "
               f"Slippage: {slippage:.4f}  Edge: {edge_display:+.3f}")
+
+        notify("info", "Order Filled",
+               f"Bought {direction} on {market['question'][:60]}",
+               fields={"Price": f"${fill_price:.4f}",
+                        "Size": f"${filled_usdc:.2f}",
+                        "Shares": f"{shares:.1f}"},
+               color=COLOR_GREEN)
 
     # ── Extended position add-on ─────────────────────────────────────────────
 
@@ -335,6 +343,12 @@ class PaperExecutor(BaseExecutor):
 
         print(f"[paper] CLOSE {trade['market_name'][:55]}")
         print(f"              Reason: {reason}  P&L: ${pnl:+.2f} ({pnl_pct:+.1f}%)")
+
+        notify("info", "Position Closed",
+               f"Exited {trade['market_name'][:60]} — {reason}",
+               fields={"P&L": f"${pnl:+.2f}",
+                        "Reason": reason},
+               color=COLOR_GREEN)
 
     # ── Position price refresh ────────────────────────────────────────────────
 

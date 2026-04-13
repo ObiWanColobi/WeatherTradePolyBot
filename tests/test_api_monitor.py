@@ -131,3 +131,42 @@ def test_non_retriable_error_raises_immediately():
         pass
     # Failure count should NOT increment for non-retriable
     assert cb._fail_count == 0
+
+
+@patch("api_monitor.notify")
+def test_breaker_trip_sends_notification(mock_notify):
+    cb = CircuitBreaker("test_notif", trip_threshold=3, cooldowns=[60])
+    for _ in range(3):
+        cb.record_failure(retriable=True)
+    mock_notify.assert_called()
+    call_args = mock_notify.call_args
+    assert call_args[0][0] == "warning"
+    assert "circuit breaker" in call_args[0][1].lower()
+
+
+@patch("api_monitor.notify")
+def test_breaker_recovery_sends_notification(mock_notify):
+    cb = CircuitBreaker("test_recov", trip_threshold=3, cooldowns=[0.1])
+    for _ in range(3):
+        cb.record_failure(retriable=True)
+    time.sleep(0.15)
+    cb.record_success()
+    # Should have been called twice: once for trip, once for recovery
+    assert mock_notify.call_count >= 2
+    last_call = mock_notify.call_args
+    assert "Recovered" in last_call[0][1]
+
+
+@patch("api_monitor.notify")
+def test_non_retriable_sends_critical_notification(mock_notify):
+    cb = CircuitBreaker("test_crit", trip_threshold=3, cooldowns=[60])
+
+    def auth_fail():
+        raise NonRetriableError("401 Unauthorized")
+
+    try:
+        cb.call(auth_fail)
+    except NonRetriableError:
+        pass
+    mock_notify.assert_called_once()
+    assert mock_notify.call_args[0][0] == "critical"
