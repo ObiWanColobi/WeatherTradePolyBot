@@ -39,16 +39,9 @@ _layer        = WeatherLayer()
 _risk_manager: RiskManager | None = None
 
 
-def _create_executor():
-    if TRADING_MODE == "live":
-        from executor.live import LiveExecutor
-        return LiveExecutor()
-    else:
-        from executor.paper import PaperExecutor
-        return PaperExecutor()
+from executor import create_executor
 
-
-_executor = _create_executor()
+_executor = create_executor()
 
 
 # -- Startup prompt -----------------------------------------------------------
