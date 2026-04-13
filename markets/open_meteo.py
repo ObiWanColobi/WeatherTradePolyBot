@@ -1,6 +1,7 @@
 import time
 import requests
 from requests.exceptions import ConnectionError as ReqConnectionError, ReadTimeout, Timeout
+import api_monitor
 
 FORECAST_API = "https://api.open-meteo.com/v1/forecast"
 ENSEMBLE_API = "https://ensemble-api.open-meteo.com/v1/ensemble"
@@ -14,36 +15,6 @@ _RETRY_DELAYS        = [3, 8, 15] # backoff on 429 or connection error (3 attemp
 # Module-level telemetry for calibration scheduler gating
 _last_429_ts: float = 0.0         # unix timestamp of most recent 429 from any endpoint
 _last_ensemble_ts: float = 0.0    # unix timestamp of most recent ensemble API call
-
-# ── Circuit breaker ──────────────────────────────────────────────────────────
-# When the API is down (502/503/timeouts), avoid burning 26s+ of retries per
-# city per poll cycle. After _CB_THRESHOLD consecutive failures, skip all API
-# calls for _CB_COOLDOWN seconds and serve stale cache instead.
-_CB_THRESHOLD = 3          # consecutive failures before tripping
-_CB_COOLDOWN  = 120        # seconds to wait before retrying after trip
-_cb_fail_count: int = 0    # consecutive point-forecast failures
-_cb_tripped_ts: float = 0  # unix timestamp when breaker tripped
-
-
-def _cb_is_open() -> bool:
-    """True when the circuit breaker is tripped and cooldown hasn't elapsed."""
-    if _cb_fail_count < _CB_THRESHOLD:
-        return False
-    return (time.time() - _cb_tripped_ts) < _CB_COOLDOWN
-
-
-def _cb_record_success() -> None:
-    global _cb_fail_count
-    _cb_fail_count = 0
-
-
-def _cb_record_failure() -> None:
-    global _cb_fail_count, _cb_tripped_ts
-    _cb_fail_count += 1
-    if _cb_fail_count >= _CB_THRESHOLD:
-        _cb_tripped_ts = time.time()
-        print(f"[open_meteo] circuit breaker tripped after {_cb_fail_count} consecutive failures — "
-              f"skipping API calls for {_CB_COOLDOWN}s")
 
 
 def get_last_429_ts() -> float:
@@ -60,7 +31,7 @@ def get_daily_forecast(lat: float, lon: float, tz: str = "auto", days: int = 4) 
     Each entry: {"date": "YYYY-MM-DD", "temp_max_c": float}
     Returns empty list on failure.
     """
-    if _cb_is_open():
+    if api_monitor.get_breaker("open_meteo").state == "OPEN":
         return []
 
     for attempt in range(1 + len(_RETRY_DELAYS)):
@@ -82,14 +53,14 @@ def get_daily_forecast(lat: float, lon: float, tz: str = "auto", days: int = 4) 
             if resp.status_code in (502, 503):
                 print(f"[open_meteo] point forecast failed ({lat},{lon}): "
                       f"{resp.status_code} Server Error — skipping retries")
-                _cb_record_failure()
+                api_monitor.get_breaker("open_meteo").record_failure(retriable=True)
                 return []
             resp.raise_for_status()
             data  = resp.json()
             daily = data.get("daily", {})
             dates = daily.get("time", [])
             temps = daily.get("temperature_2m_max", [])
-            _cb_record_success()
+            api_monitor.get_breaker("open_meteo").record_success()
             return [
                 {"date": d, "temp_max_c": float(t)}
                 for d, t in zip(dates, temps)
@@ -98,13 +69,13 @@ def get_daily_forecast(lat: float, lon: float, tz: str = "auto", days: int = 4) 
         except (ReqConnectionError, ReadTimeout, Timeout) as e:
             # Network-level failures indicate API is down — skip retries
             print(f"[open_meteo] point forecast failed ({lat},{lon}): {e}")
-            _cb_record_failure()
+            api_monitor.get_breaker("open_meteo").record_failure(retriable=True)
             return []
         except Exception as e:
             if attempt < len(_RETRY_DELAYS):
                 continue
             print(f"[open_meteo] point forecast failed ({lat},{lon}): {e}")
-            _cb_record_failure()
+            api_monitor.get_breaker("open_meteo").record_failure(retriable=True)
     return []
 
 
@@ -123,7 +94,7 @@ def get_ensemble_forecasts(lat: float, lon: float, tz: str = "auto", days: int =
     Each entry: {"date": "YYYY-MM-DD", "member_temps": [float, ...]}  (up to 71 values)
     Returns empty list on failure — point forecast is the fallback.
     """
-    if _cb_is_open():
+    if api_monitor.get_breaker("open_meteo").state == "OPEN":
         return []
 
     combined: dict[str, list[float]] = {}   # date → accumulated member temps
@@ -153,22 +124,22 @@ def get_ensemble_forecasts(lat: float, lon: float, tz: str = "auto", days: int =
                 if resp.status_code in (502, 503):
                     print(f"[open_meteo] ensemble fetch failed model={model} ({lat},{lon}): "
                           f"{resp.status_code} Server Error — skipping retries")
-                    _cb_record_failure()
+                    api_monitor.get_breaker("open_meteo").record_failure(retriable=True)
                     break
                 resp.raise_for_status()
                 data = resp.json()
-                _cb_record_success()
+                api_monitor.get_breaker("open_meteo").record_success()
                 break
             except (ReqConnectionError, ReadTimeout, Timeout) as e:
                 # Network-level failures indicate API is down — skip retries
                 print(f"[open_meteo] ensemble fetch failed model={model} ({lat},{lon}): {e}")
-                _cb_record_failure()
+                api_monitor.get_breaker("open_meteo").record_failure(retriable=True)
                 break
             except Exception as e:
                 if attempt < len(_RETRY_DELAYS):
                     continue   # retry on SSL errors, parse errors, etc.
                 print(f"[open_meteo] ensemble fetch failed model={model} ({lat},{lon}): {e}")
-                _cb_record_failure()
+                api_monitor.get_breaker("open_meteo").record_failure(retriable=True)
 
         if data is None:
             time.sleep(_INTER_REQUEST_DELAY)
