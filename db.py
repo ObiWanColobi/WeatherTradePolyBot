@@ -3,9 +3,18 @@ import sqlite3
 from datetime import datetime, timezone
 from config import DB_PATH, PAPER_STARTING_BALANCE
 
+_DB_PATH = DB_PATH
+_MEM_CONN: sqlite3.Connection | None = None  # shared connection for :memory: testing
+
 
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    global _MEM_CONN
+    if _DB_PATH == ":memory:":
+        if _MEM_CONN is None:
+            _MEM_CONN = sqlite3.connect(":memory:", check_same_thread=False)
+            _MEM_CONN.row_factory = sqlite3.Row
+        return _MEM_CONN
+    conn = sqlite3.connect(_DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -163,6 +172,22 @@ def init_db():
                 forecast TEXT NOT NULL,
                 ensemble TEXT NOT NULL
             );
+        """)
+
+        # Notifications — system alerts and trade events logged for the dashboard
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS notifications (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp   TEXT NOT NULL,
+                severity    TEXT NOT NULL,
+                channel     TEXT NOT NULL,
+                title       TEXT NOT NULL,
+                message     TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_notifications_severity
+                ON notifications(severity);
+            CREATE INDEX IF NOT EXISTS idx_notifications_timestamp
+                ON notifications(timestamp DESC);
         """)
 
         # Safe schema migrations — no-op if column already exists
@@ -1154,3 +1179,35 @@ def get_market_metadata_from_scanner_cache(market_id: str) -> dict | None:
             if city and end_date:
                 return {"city": city, "end_date": end_date, "threshold": threshold}
     return None
+
+
+# ── Notifications ──────────────────────────────────────────────
+
+def save_notification(severity: str, channel: str, title: str, message: str) -> None:
+    ts = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO notifications (timestamp, severity, channel, title, message) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (ts, severity, channel, title, message),
+        )
+
+
+def get_notifications(
+    severity_in: list[str],
+    limit: int = 20,
+    since: str | None = None,
+) -> list[dict]:
+    placeholders = ",".join("?" for _ in severity_in)
+    sql = (
+        f"SELECT * FROM notifications WHERE severity IN ({placeholders})"
+    )
+    params: list = list(severity_in)
+    if since:
+        sql += " AND timestamp > ?"
+        params.append(since)
+    sql += " ORDER BY timestamp DESC LIMIT ?"
+    params.append(limit)
+    with get_conn() as conn:
+        rows = conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
