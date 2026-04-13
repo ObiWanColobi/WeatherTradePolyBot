@@ -130,6 +130,21 @@ WEATHER = {
     "risk_email_to":               "",
     "risk_email_password":         "",      # app password, not account password
 
+    # ── Discord notifications ──
+    "discord_webhook_alerts":       "",       # webhook URL for #bot-alerts
+    "discord_webhook_trades":       "",       # webhook URL for #bot-trades
+
+    # ── API circuit breaker ──
+    "api_breaker_trip_threshold":   3,        # consecutive failures before trip
+    "api_breaker_cooldowns":        [120, 300, 600, 1800, 3600],  # escalating seconds
+
+    # ── CLOB rate limiting ──
+    "clob_inter_request_delay":     0.3,      # min seconds between CLOB calls
+
+    # ── Health monitoring ──
+    "heartbeat_stale_threshold":    300,      # seconds before crash detection fires
+    "dashboard_bot_down_threshold": 180,      # seconds before dashboard shows offline
+
     # ── Extended positions (scale-in) ─────────────────────────────────────────
     "extended_positions_enabled":          True,    # master toggle — False skips pass entirely
     "extended_positions_max_add_ons":      2,       # max add-on legs (3 total with initial entry)
