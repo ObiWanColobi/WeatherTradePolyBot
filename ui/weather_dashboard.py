@@ -22,9 +22,19 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import db
-from config import WEATHER, PAPER_STARTING_BALANCE
+from config import WEATHER, PAPER_STARTING_BALANCE, TRADING_MODE
 from weather_risk import RiskManager
-from executor.paper import PaperExecutor
+from executor import create_executor
+
+
+@st.cache_resource
+def _get_executor():
+    """Cached executor — initializes once per Streamlit session."""
+    try:
+        return create_executor()
+    except Exception as e:
+        print(f"[dashboard] Executor init failed: {e}")
+        return None
 
 
 def _tr_ens(market_id: str, direction: str) -> str:
@@ -143,6 +153,10 @@ with st.sidebar:
     loss_count, loss_total = db.get_today_realized_losses()
     st.caption(f"Losses today: {loss_count} trades, ${loss_total:.2f}")
     st.caption(f"Loss limit: {WEATHER.get('risk_daily_loss_limit_pct', 0.15):.0%} of account")
+    if TRADING_MODE == "live":
+        st.warning("🔴 LIVE mode — closes execute real CLOB orders")
+    else:
+        st.info("📄 Paper mode")
 
     st.divider()
 
@@ -170,23 +184,26 @@ with st.sidebar:
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("✅ Confirm Close All", type="primary"):
-                    executor = PaperExecutor()
-                    closed_ids = []
-                    for t in open_trades:
-                        executor.close_full(t, reason="manual_close_all")
-                        _risk_mgr.add_manual_close(t.get("market_id", ""))
-                        closed_ids.append(t.get("market_name", "")[:40])
-                        print(f"[risk] manual close-all: {t.get('market_name', '')[:50]}")
-                    _risk_mgr.send_alert(
-                        "manual_close_all",
-                        f"All positions closed manually.\n\n"
-                        f"Closed {len(closed_ids)} positions:\n" +
-                        "\n".join(f"  - {name}" for name in closed_ids),
-                    )
-                    st.session_state.confirm_close_all = False
-                    st.success(f"Closed {len(closed_ids)} positions.")
-                    time.sleep(1)
-                    st.rerun()
+                    executor = _get_executor()
+                    if executor is None:
+                        st.error("Cannot close — executor not available. Check wallet config.")
+                    else:
+                        closed_ids = []
+                        for t in open_trades:
+                            executor.close_full(t, reason="manual_close_all")
+                            _risk_mgr.add_manual_close(t.get("market_id", ""))
+                            closed_ids.append(t.get("market_name", "")[:40])
+                            print(f"[risk] manual close-all: {t.get('market_name', '')[:50]}")
+                        _risk_mgr.send_alert(
+                            "manual_close_all",
+                            f"All positions closed manually.\n\n"
+                            f"Closed {len(closed_ids)} positions:\n" +
+                            "\n".join(f"  - {name}" for name in closed_ids),
+                        )
+                        st.session_state.confirm_close_all = False
+                        st.success(f"Closed {len(closed_ids)} positions.")
+                        time.sleep(1)
+                        st.rerun()
             with c2:
                 if st.button("❌ Cancel"):
                     st.session_state.confirm_close_all = False
@@ -548,16 +565,19 @@ if open_trades:
         c1, c2, _ = st.columns([1, 1, 6])
         with c1:
             if st.button("✅ Confirm", key=f"btn_confirm_{trade_id}", type="primary"):
-                executor = PaperExecutor()
-                if t.get("_legs"):
-                    executor.close_position(t, reason="manual_close")
+                executor = _get_executor()
+                if executor is None:
+                    st.error("Cannot close — executor not available. Check wallet config.")
                 else:
-                    executor.close_full(t, reason="manual_close")
-                _risk_mgr.add_manual_close(t.get("market_id", ""))
-                print(f"[risk] manual close: {t.get('market_name', '')[:50]}")
-                st.session_state[state_key] = False
-                st.toast(f"Closed {city} {direction} {threshold}.")
-                st.rerun()
+                    if t.get("_legs"):
+                        executor.close_position(t, reason="manual_close")
+                    else:
+                        executor.close_full(t, reason="manual_close")
+                    _risk_mgr.add_manual_close(t.get("market_id", ""))
+                    print(f"[risk] manual close: {t.get('market_name', '')[:50]}")
+                    st.session_state[state_key] = False
+                    st.toast(f"Closed {city} {direction} {threshold}.")
+                    st.rerun()
         with c2:
             if st.button("❌ Cancel", key=f"btn_cancel_{trade_id}"):
                 st.session_state[state_key] = False
