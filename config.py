@@ -184,8 +184,8 @@ WEATHER = {
     # ║  Discord webhooks and optional email alerts                             ║
     # ╚═══════════════════════════════════════════════════════════════════════════╝
     # Discord — leave empty string to disable
-    "discord_webhook_alerts":       "https://discord.com/api/webhooks/1493121021837049908/gyApTp5bWSkNYEw_u2YkXuF8IQ75WACuxRV2XBz67QSL7gIEFhzP2Vx6W3_K86PcZTBb",
-    "discord_webhook_trades":       "https://discord.com/api/webhooks/1493121459806146630/VACFqxyWTVTDnMDugdBA4XbfYLVtzGGMMzuscPpex1DOKXgxQ2U2MsWhOlY-N0yLG3Z3",
+    "discord_webhook_alerts":       os.getenv("DISCORD_WEBHOOK_ALERTS", ""),
+    "discord_webhook_trades":       os.getenv("DISCORD_WEBHOOK_TRADES", ""),
 
     # Email — set risk_email_enabled to True to activate
     "risk_email_enabled":          False,
