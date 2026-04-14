@@ -25,9 +25,12 @@ MIN_HOURS_TO_CLOSE = 1
 
 # ── Weather Layer ─────────────────────────────────────────────────────────────
 WEATHER = {
-    "min_edge":                  0.05,  # minimum probability gap used by the bot decision layer
 
-    # ── Scanner display filters ───────────────────────────────────────────────
+    # ╔═══════════════════════════════════════════════════════════════════════════╗
+    # ║  SCANNER & MARKET FILTERS                                               ║
+    # ║  Controls which markets appear in the scanner and qualify for evaluation ║
+    # ╚═══════════════════════════════════════════════════════════════════════════╝
+    "min_edge":                  0.05,  # minimum probability gap used by the bot decision layer
     "scanner_min_yes":           0.05,  # hide markets with YES price below this (crowd too certain NO)
     "scanner_max_yes":           0.95,  # hide markets with YES price above this (crowd too certain YES)
     "scanner_min_edge_pct":      0.05,  # minimum model vs market gap to show (5% = 0.05)
@@ -43,34 +46,29 @@ WEATHER = {
         "atlanta", "sao paulo", "tel aviv", "lucknow", "shanghai",
     ],
 
-    # ── Bot loop ──────────────────────────────────────────────────────────────
-    "bot_poll_interval_seconds": 60,    # seconds between polls
-    "bot_cache_refresh_polls":   10,    # refresh ensemble cache every N polls
-
-    # Scanner cache — used by weather_scanner.py for discovery/display only
-    "cache_ttl_minutes":         90,   # scan-only cities (no open position)
-    "position_cache_ttl_minutes": 25,  # cities with an open trade — prioritise freshness
-
-    # Decision layer — top N markets the bot will actually evaluate for trades.
+    # Top N markets the bot will actually evaluate for trades.
     # All others are ignored by estimate() to avoid wasting API calls.
     # Candidates are ranked by 24h volume and refreshed on each WeatherLayer.refresh() call.
     "top_n_markets":             30,
 
-    # ── Exit conditions ───────────────────────────────────────────────────────
-    "exit_ensemble_flip_threshold":  0.25,  # exit if ensemble shifts >25pts from entry
-    "exit_adverse_price_move_pct":  0.30,  # exit if price moves >30% of fill against position
-    "exit_adverse_min_move_cents":  0.10,  # floor: never exit on moves smaller than 10 cents (prevents noise exits on cheap tokens)
-    "exit_adverse_min_hold_minutes": 60,   # no adverse exit within first 60 min (post-entry price settling)
-    "exit_adverse_skip_unanimous_pct": 0.90,  # skip adverse exit when ensemble conviction >= 90% (trust the model)
-    "exit_no_exit_hours_to_close":  2.0,   # never exit within 2h of resolution
+    # ╔═══════════════════════════════════════════════════════════════════════════╗
+    # ║  BOT LOOP & CACHING                                                     ║
+    # ║  Poll timing, cache freshness, and forecast staleness                    ║
+    # ╚═══════════════════════════════════════════════════════════════════════════╝
+    "bot_poll_interval_seconds": 60,    # seconds between polls
+    "bot_cache_refresh_polls":   10,    # refresh ensemble cache every N polls
+    "cache_ttl_minutes":         90,    # scan-only cities (no open position)
+    "position_cache_ttl_minutes": 25,   # cities with an open trade — prioritise freshness
 
-    # ── Kelly position sizing ─────────────────────────────────────────────────
-    "kelly_fraction":        0.50,   # fractional Kelly multiplier (0.5 = half-Kelly)
-    "kelly_max_bet_usdc":   200.00,   # hard cap per trade in USDC
-    "kelly_min_bet_usdc":    5.00,   # minimum bet size (below this = skip)
-    "kelly_max_balance_pct": 0.10,   # never risk more than 10% of balance per trade
+    # How fresh the forecast must be when making a trade decision.
+    # 180 min = 3 hours, aligned to ICON ensemble update cadence.
+    # estimate() will force-fetch if the cached data is older than this.
+    "decision_cache_ttl_minutes": 180,
 
-    # ── Entry conditions ──────────────────────────────────────────────────────
+    # ╔═══════════════════════════════════════════════════════════════════════════╗
+    # ║  ENTRY CONDITIONS                                                       ║
+    # ║  Gates a market must pass before the bot will enter a position           ║
+    # ╚═══════════════════════════════════════════════════════════════════════════╝
     "entry_min_ensemble_conviction": 0.70,  # ensemble must be >=70% or <=30% YES
     "entry_min_edge_pct":            0.12,  # model vs market gap (tighter than scanner)
     "entry_min_fill_price":          0.15,  # block entries where the token costs < $0.15 (avoids ultra-cheap tokens where noise dominates price action)
@@ -80,6 +78,7 @@ WEATHER = {
     "entry_min_ensemble_margin_c":       3.0,   # ensemble mean must be >=3°C from threshold at minimum conviction (raised from 2.0 on 2026-04-07)
     "entry_min_ensemble_margin_c_floor": 1.5,   # margin floor for unanimous ensembles (0/69 or 69/69); scales linearly up to entry_min_ensemble_margin_c at min conviction
     "entry_max_slippage_pct":        0.05,  # max simulated fill slippage as % of mid (5%)
+    "entry_min_net_edge_pct":        0.05,  # minimum edge remaining after slippage, any tier (5%)
 
     # ── Unanimous weak-edge entry ─────────────────────────────────────────────
     # When ensemble conviction is >= this threshold (~67/69 members), the edge
@@ -87,84 +86,124 @@ WEATHER = {
     # 7% floor accounts for ~2% Polymarket taker fee + ~2-3% slippage cushion.
     "entry_unanimous_min_conviction":  0.97,   # ≥97% of ensemble members (~67/69)
     "entry_unanimous_min_edge_pct":    0.07,   # relaxed floor when unanimous (vs 12% normal)
-    "kelly_max_bet_usdc_unanimous":   50.00,   # separate hard cap for unanimous-weak trades
-    "entry_min_net_edge_pct":          0.05,   # minimum edge remaining after slippage, any tier (5%)
 
-    # ── Decision layer ────────────────────────────────────────────────────────
-    "decision_max_open_positions":        20,   # max concurrent open trades (increase freely)
-    "decision_max_exposure_pct":          0.9,   # max total balance % at risk across all open trades
-    "decision_max_positions_per_city_date": 2,  # max positions per (city, resolution-date) — allows different thresholds, caps concentration
+    # ╔═══════════════════════════════════════════════════════════════════════════╗
+    # ║  EXIT CONDITIONS                                                        ║
+    # ║  When to close an open position before market resolution                ║
+    # ╚═══════════════════════════════════════════════════════════════════════════╝
+    "exit_ensemble_flip_threshold":     0.25,  # exit if ensemble shifts >25pts from entry
+    "exit_adverse_price_move_pct":      0.30,  # exit if price moves >30% of fill against position
+    "exit_adverse_min_move_cents":      0.10,  # floor: never exit on moves smaller than 10 cents (prevents noise exits on cheap tokens)
+    "exit_adverse_min_hold_minutes":    60,    # no adverse exit within first 60 min (post-entry price settling)
+    "exit_adverse_skip_unanimous_pct":  .9,  # skip adverse exit when ensemble conviction >= 90% (trust the model)
+    "exit_no_exit_hours_to_close":      2.0,   # never exit within 2h of resolution
 
-    # ── Trader ensemble (social signal) ──────────────────────────────────────
-    # Secondary ensemble from tracked Polymarket traders. Informational only —
-    # never blocks a trade. Used to log CONFIRM/DIVERGE/NEUTRAL alongside each entry.
+    # ╔═══════════════════════════════════════════════════════════════════════════╗
+    # ║  KELLY POSITION SIZING                    [paper defaults, see Live      ║
+    # ║  Half-Kelly with hard caps                 Overrides section for live]   ║
+    # ╚═══════════════════════════════════════════════════════════════════════════╝
+    "kelly_fraction":                0.50,    # fractional Kelly multiplier (0.5 = half-Kelly)
+    "kelly_max_bet_usdc":           15.00,   # PAPER: hard cap per trade in USDC
+    "kelly_min_bet_usdc":             5.00,   # minimum bet size (below this = skip)
+    "kelly_max_balance_pct":          0.10,   # never risk more than 10% of balance per trade
+    "kelly_max_bet_usdc_unanimous":  50.00,   # PAPER: separate hard cap for unanimous-weak trades
+
+    # ╔═══════════════════════════════════════════════════════════════════════════╗
+    # ║  DECISION LAYER / PORTFOLIO LIMITS                                      ║
+    # ║  Concentration and exposure caps across all open positions               ║
+    # ╚═══════════════════════════════════════════════════════════════════════════╝
+    "decision_max_open_positions":          20,   # max concurrent open trades
+    "decision_max_exposure_pct":            .5,  # max total balance % at risk across all open trades
+    "decision_max_positions_per_city_date":  2,   # max positions per (city, resolution-date) — allows different thresholds, caps concentration
+
+    # ╔═══════════════════════════════════════════════════════════════════════════╗
+    # ║  EXTENDED POSITIONS (SCALE-IN)                                          ║
+    # ║  Adding to winning positions over time                                  ║
+    # ╚═══════════════════════════════════════════════════════════════════════════╝
+    "extended_positions_enabled":                True,   # master toggle — False skips pass entirely
+    "extended_positions_max_add_ons":            2,      # max add-on legs (3 total with initial entry)
+    "extended_positions_leg_spacing_hours":      12.0,   # time-to-close band spacing per leg
+    "extended_positions_min_cooldown_hours":     12.0,   # minimum hours between any two legs
+    "extended_positions_rejection_cooldown_hours": 1.0,  # cooldown after a rejected extend attempt (slippage/thin book)
+    "extended_positions_min_net_edge":           0.05,   # minimum edge after slippage cost to bother extending (5%)
+
+    # ╔═══════════════════════════════════════════════════════════════════════════╗
+    # ║  RISK MANAGEMENT                          [paper defaults, see Live     ║
+    # ║  Daily loss limits and breaker behavior    Overrides section for live]   ║
+    # ╚═══════════════════════════════════════════════════════════════════════════╝
+    "risk_daily_loss_limit_pct":   0.25,    # PAPER: 15% of account value
+    "risk_auto_reset":             True,    # PAPER: midnight UTC auto-reset; live overrides to False
+
+    # ╔═══════════════════════════════════════════════════════════════════════════╗
+    # ║  ★ LIVE TRADING OVERRIDES ★               (TRADING_MODE == "live" ONLY) ║
+    # ║  These REPLACE the paper defaults above when running with real money.   ║
+    # ║  More conservative caps to limit downside while validating the system.  ║
+    # ╚═══════════════════════════════════════════════════════════════════════════╝
+    "live_kelly_max_bet_usdc":           15.00,   # overrides kelly_max_bet_usdc ($15 vs $200 paper)
+    "live_kelly_max_bet_usdc_unanimous": 10.00,   # overrides kelly_max_bet_usdc_unanimous ($10 vs $50 paper)
+    "live_risk_daily_loss_limit_pct":     0.25,   # overrides risk_daily_loss_limit_pct (same for now, tighten as needed)
+    "live_risk_auto_reset":              True,   # overrides risk_auto_reset — (False = manual override only, no midnight reset)
+
+    # ╔═══════════════════════════════════════════════════════════════════════════╗
+    # ║  ★ ON-CHAIN CLAIMS ★                      (TRADING_MODE == "live" ONLY) ║
+    # ║  Polygon transaction settings for redeeming winning positions           ║
+    # ╚═══════════════════════════════════════════════════════════════════════════╝
+    "claim_retry_backoff_minutes":  [5, 30, 120, 480, 1440],  # 5min, 30min, 2hr, 8hr, 24hr
+    "claim_min_matic_balance":      0.01,                       # defer claims if MATIC below this
+    "polygon_rpc_url":              os.getenv("POLYGON_RPC_URL", "https://rpc.ankr.com/polygon"),
+
+    # ╔═══════════════════════════════════════════════════════════════════════════╗
+    # ║  TRADER ENSEMBLE (SOCIAL SIGNAL)                                        ║
+    # ║  Secondary signal from tracked Polymarket wallets. Informational only — ║
+    # ║  never blocks a trade. Logs CONFIRM/DIVERGE/NEUTRAL alongside entries.  ║
+    # ╚═══════════════════════════════════════════════════════════════════════════╝
     "trader_monitor_poll_every_n":     10,    # run trader position poll every N bot polls (~10 min)
     "trader_monitor_max_wallets":     100,    # cap wallets polled per update pass (top by n_resolved)
     "trader_consensus_min_resolved":    6,    # min resolved trades before a wallet counts in consensus
     "trader_consensus_min_win_rate":   0.55,  # min win rate to count toward consensus signal
     "trader_consensus_confirm_count":   2,    # min same-direction traders to trigger CONFIRM signal
+
+    # ── Trader discovery ──────────────────────────────────────────────────────
     "trader_discovery_min_trades":      5,    # min unique weather markets to qualify as a tracked trader
     "trader_discovery_max_markets":   400,    # max unique markets — above this = AMM/market maker
     "trader_discovery_max_tpm":        5.0,   # max avg trades-per-market — above this = HFT bot
     "trader_discovery_max_avg_price":  0.85,  # max avg entry price — above this = certainty harvester
     "trader_discovery_recency_days":   60,    # wallet must have traded within last N days
 
-    # How fresh the forecast must be when making a trade decision.
-    # 180 min = 3 hours, aligned to ICON ensemble update cadence.
-    # estimate() will force-fetch if the cached data is older than this.
-    "decision_cache_ttl_minutes": 180,
-
-    # ── Trader shadow forecast DB (Stage 2) ───────────────────────────────────
-    "trader_forecast_freeze_max_per_cycle": 50,         # cap untraded-market CLOB checks per resolution pass
-    "calibration_temp_pass_max_cities": 20,             # cap cities fetched per temperature pass (archive API burst control)
+    # ╔═══════════════════════════════════════════════════════════════════════════╗
+    # ║  CALIBRATION SCHEDULER                                                  ║
+    # ║  Resolution checks, temperature archive fetches, rate-limit guards      ║
+    # ╚═══════════════════════════════════════════════════════════════════════════╝
+    "trader_forecast_freeze_max_per_cycle":          50,   # cap untraded-market CLOB checks per resolution pass
+    "calibration_temp_pass_max_cities":              20,   # cap cities fetched per temperature pass (archive API burst control)
     "calibration_temp_pass_cooldown_after_429_minutes": 10,  # skip temp pass if any Open-Meteo 429 seen within N min
     "calibration_temp_pass_skip_if_ensemble_within_seconds": 60,  # skip temp pass if ensemble burst fired recently
 
-    # ── Risk management ──────────────────────────────────────────────────────
-    "risk_daily_loss_limit_pct":   0.15,    # 15% of account value — loose for paper, tighten for live
-    "risk_auto_reset":             True,    # True = paper (midnight UTC reset), False = live (restart or UI override to clear)
-    "risk_email_enabled":          False,   # opt-in email alerts
+    # ╔═══════════════════════════════════════════════════════════════════════════╗
+    # ║  NOTIFICATIONS                                                          ║
+    # ║  Discord webhooks and optional email alerts                             ║
+    # ╚═══════════════════════════════════════════════════════════════════════════╝
+    # Discord — leave empty string to disable
+    "discord_webhook_alerts":       "https://discord.com/api/webhooks/1493121021837049908/gyApTp5bWSkNYEw_u2YkXuF8IQ75WACuxRV2XBz67QSL7gIEFhzP2Vx6W3_K86PcZTBb",
+    "discord_webhook_trades":       "https://discord.com/api/webhooks/1493121459806146630/VACFqxyWTVTDnMDugdBA4XbfYLVtzGGMMzuscPpex1DOKXgxQ2U2MsWhOlY-N0yLG3Z3",
+
+    # Email — set risk_email_enabled to True to activate
+    "risk_email_enabled":          False,
     "risk_email_smtp_host":        "",      # e.g. "smtp.gmail.com"
     "risk_email_smtp_port":        587,
     "risk_email_from":             "",
     "risk_email_to":               "",
     "risk_email_password":         "",      # app password, not account password
 
-    # ── Discord notifications ──
-    "discord_webhook_alerts":       "",       # webhook URL for #bot-alerts
-    "discord_webhook_trades":       "",       # webhook URL for #bot-trades
-
-    # ── API circuit breaker ──
-    "api_breaker_trip_threshold":   3,        # consecutive failures before trip
-    "api_breaker_cooldowns":        [120, 300, 600, 1800, 3600],  # escalating seconds
-
-    # ── CLOB rate limiting ──
-    "clob_inter_request_delay":     0.3,      # min seconds between CLOB calls
-
-    # ── Health monitoring ──
-    "heartbeat_stale_threshold":    300,      # seconds before crash detection fires
-    "dashboard_bot_down_threshold": 180,      # seconds before dashboard shows offline
-
-    # ── Extended positions (scale-in) ─────────────────────────────────────────
-    "extended_positions_enabled":          True,    # master toggle — False skips pass entirely
-    "extended_positions_max_add_ons":      2,       # max add-on legs (3 total with initial entry)
-    "extended_positions_leg_spacing_hours": 12.0,   # time-to-close band spacing per leg
-    "extended_positions_min_cooldown_hours": 12.0,  # minimum hours between any two legs
-    "extended_positions_rejection_cooldown_hours": 1.0,  # cooldown after a rejected extend attempt (slippage/thin book)
-    "extended_positions_min_net_edge":     0.05,  # minimum edge after slippage cost to bother extending (5%)
-
-    # ── Live trading overrides ───────────────────────────────────────────────
-    # These values are used ONLY when TRADING_MODE == "live".
-    # They override the paper defaults to be more conservative with real money.
-    "live_kelly_max_bet_usdc":          25.00,    # start small — $25 max per trade
-    "live_kelly_max_bet_usdc_unanimous": 10.00,   # $10 cap for unanimous-weak
-    "live_risk_daily_loss_limit_pct":    0.05,    # 5% daily loss limit (vs 15% paper)
-    "live_risk_auto_reset":              False,   # no auto-reset — manual override only
-
-    # ── On-chain claim/redeem (live only) ────────────────────────────────────
-    "claim_retry_backoff_minutes":  [5, 30, 120, 480, 1440],  # 5min, 30min, 2hr, 8hr, 24hr
-    "claim_min_matic_balance":      0.01,                       # defer claims if MATIC below this
-    "polygon_rpc_url":              "https://polygon-rpc.com",  # Polygon JSON-RPC endpoint
+    # ╔═══════════════════════════════════════════════════════════════════════════╗
+    # ║  API RELIABILITY                                                        ║
+    # ║  Circuit breaker, rate limiting, and health monitoring                  ║
+    # ╚═══════════════════════════════════════════════════════════════════════════╝
+    "api_breaker_trip_threshold":    3,                           # consecutive failures before trip
+    "api_breaker_cooldowns":        [120, 300, 600, 1800, 3600], # escalating seconds
+    "clob_inter_request_delay":     0.3,                         # min seconds between CLOB calls
+    "heartbeat_stale_threshold":    300,                         # seconds before crash detection fires
+    "dashboard_bot_down_threshold": 180,                         # seconds before dashboard shows offline
 }
 
 # ── API Endpoints ─────────────────────────────────────────────────────────────

@@ -111,7 +111,8 @@ class CircuitBreaker:
                    str(e),
                    fields={"Breaker": self.name, "Error": str(e)})
             raise  # propagate immediately, don't affect breaker
-        except Exception:
+        except Exception as e:
+            print(f"[api_monitor] {self.name} call failed: {type(e).__name__}: {e}")
             self.record_failure(retriable=True)
             return None
 

@@ -34,15 +34,15 @@ class PaperExecutor(BaseExecutor):
 
     # ── Order placement ───────────────────────────────────────────────────────
 
-    def place_order(self, market: dict, direction: str, size_usdc: float, estimate: dict):
+    def place_order(self, market: dict, direction: str, size_usdc: float, estimate: dict) -> bool:
         balance = db.get_balance()
         if size_usdc > balance:
             print(f"[paper] Skipping — insufficient balance ${balance:.2f} < ${size_usdc:.2f}")
-            return
+            return False
 
         # One open position per market at a time
         if db.get_open_trade_for_market(market["id"]):
-            return
+            return False
 
         # Select the token we are actually buying.
         # YES trades buy YES tokens; NO trades buy NO tokens.
@@ -53,13 +53,13 @@ class PaperExecutor(BaseExecutor):
             token_id = market.get("no_token_id") or market.get("token_id")
 
         if not token_id:
-            return
+            return False
 
         fill_price, filled_usdc = self._simulate_fill(token_id, "BUY", size_usdc)
 
         if filled_usdc < 1.0:
             print(f"[paper] Skipping — order book too thin to fill: {market['question'][:60]}")
-            return
+            return False
 
         shares = filled_usdc / fill_price
 
@@ -124,6 +124,7 @@ class PaperExecutor(BaseExecutor):
                         "Size": f"${filled_usdc:.2f}",
                         "Shares": f"{shares:.1f}"},
                color=COLOR_GREEN)
+        return True
 
     # ── Extended position add-on ─────────────────────────────────────────────
 

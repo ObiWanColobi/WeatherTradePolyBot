@@ -4,8 +4,8 @@ from abc import ABC, abstractmethod
 class BaseExecutor(ABC):
 
     @abstractmethod
-    def place_order(self, market: dict, direction: str, size_usdc: float, estimate: dict):
-        """Open a new position."""
+    def place_order(self, market: dict, direction: str, size_usdc: float, estimate: dict) -> bool:
+        """Open a new position. Returns True if filled, False otherwise."""
 
     @abstractmethod
     def close_partial(self, trade: dict, sell_pct: float, reason: str):

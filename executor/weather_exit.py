@@ -69,19 +69,25 @@ def check_weather_exit(trade: dict, market_data: dict, current_ensemble_pct: flo
     current_price = trade.get("current_price")
 
     # ── 1. Ensemble flip ──────────────────────────────────────────────────────
+    # Use raw yes/n counts to reconstruct entry P(YES) — entry_ensemble_pct
+    # in the DB may be direction-adjusted (conviction) rather than raw P(YES),
+    # while current_ensemble_pct is always raw P(YES) from yes/n.
     if current_ensemble_pct is not None:
-        entry_ensemble_pct = trade.get("entry_ensemble_pct")
+        entry_ens_yes = trade.get("entry_ensemble_yes")
+        entry_ens_n   = trade.get("entry_ensemble_n")
 
-        if entry_ensemble_pct is not None:
-            flip = abs(current_ensemble_pct - entry_ensemble_pct)
+        if entry_ens_yes is not None and entry_ens_n and entry_ens_n > 0:
+            entry_pyes = entry_ens_yes / entry_ens_n   # raw P(YES), same scale as current
+
+            flip = abs(current_ensemble_pct - entry_pyes)
 
             # A flip is meaningful only if it crosses the midpoint conviction zone
-            was_high = entry_ensemble_pct >= 0.70 or entry_ensemble_pct <= 0.30
+            was_high = entry_pyes >= 0.70 or entry_pyes <= 0.30
             if was_high and flip >= _ENSEMBLE_FLIP_THRESHOLD:
                 return WeatherExitSignal(
                     should_exit=True,
                     reason=(
-                        f"ensemble flipped {entry_ensemble_pct:.0%} -> "
+                        f"ensemble flipped {entry_pyes:.0%} -> "
                         f"{current_ensemble_pct:.0%} ({flip:.0%} shift)"
                     ),
                     urgent=True,
@@ -106,11 +112,18 @@ def check_weather_exit(trade: dict, market_data: dict, current_ensemble_pct: flo
             pass  # skip adverse check — too soon after entry
         else:
             # (b) Unanimous bypass: skip if entry ensemble was near-unanimous
-            entry_ens_pct = trade.get("entry_ensemble_pct")
+            # Use raw counts for consistency (entry_ensemble_pct may be
+            # direction-adjusted in older trades).
+            _ey = trade.get("entry_ensemble_yes")
+            _en = trade.get("entry_ensemble_n")
+            if _ey is not None and _en and _en > 0:
+                _entry_pyes = _ey / _en
+            else:
+                _entry_pyes = None
             is_unanimous  = (
-                entry_ens_pct is not None
-                and (entry_ens_pct >= _ADVERSE_SKIP_UNANIMOUS
-                     or entry_ens_pct <= (1.0 - _ADVERSE_SKIP_UNANIMOUS))
+                _entry_pyes is not None
+                and (_entry_pyes >= _ADVERSE_SKIP_UNANIMOUS
+                     or _entry_pyes <= (1.0 - _ADVERSE_SKIP_UNANIMOUS))
             )
 
             if is_unanimous:

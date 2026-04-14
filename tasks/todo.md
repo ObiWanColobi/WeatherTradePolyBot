@@ -186,7 +186,7 @@ Plan: `docs/superpowers/plans/2026-04-12-phase2-claim-redeem.md` (10 tasks)
 - [x] Reduce initial bet sizes ($25 max, $10 unanimous) — pre-configured in `live_kelly_max_bet_usdc`
 - [ ] Emergency kill switch — halt all trading + cancel all open orders instantly
 - [ ] Slippage kill-switch — if actual fill deviates >X% from expected, halt and alert
-- [ ] Order expiry / time-in-force — don't leave orders on book indefinitely
+- [x] Order expiry / time-in-force — startup reconciliation cancels all leftover orders; FOK orders don't persist on book (2026-04-13)
 - [ ] Nonce management (prevent wallet bricking from nonce collisions)
 
 ### Phase 4 — Monitoring & Alerts for 24/7 Operation — COMPLETE (2026-04-12)
@@ -214,6 +214,13 @@ Plan: `docs/superpowers/plans/2026-04-12-phase4-monitoring-alerts.md` (14 tasks)
 - [ ] Confirm auto-claim works on first resolved market
 - [ ] Run for 1-2 weeks, review all trades manually
 - [ ] Gradually increase bet sizes once validated
+- [x] **Stale position reconciliation** — `reconcile_positions()` now auto-closes stale DB positions, queries CLOB trade history for real exit P&L, and cancels leftover open orders on startup. (2026-04-13)
+
+---
+
+## Potential Improvements (Low Priority)
+
+- [ ] **Relayer API for gasless claims** — Replace direct web3 `redeemPositions()` with Polymarket's relayer (`py-builder-relayer-client`). Eliminates MATIC dependency and gas guard logic. Current gas cost is <$0.04/day so savings are negligible; main benefit is removing MATIC as a failure mode. Requires Polymarket proxy wallet address + Builder API credentials or Relayer API Key. Docs: https://docs.polymarket.com/developers/builders/relayer-client
 
 ---
 

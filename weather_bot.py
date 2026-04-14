@@ -236,7 +236,7 @@ def run_entry_pass(already_traded: set, max_bet: float, dry_run: bool = False) -
             "threshold":          c["_scan_data"].get("target_str"),
         }
 
-        _executor.place_order(
+        filled = _executor.place_order(
             market    = market,
             direction = result.direction.upper(),
             size_usdc = result.size_usdc,
@@ -244,7 +244,8 @@ def run_entry_pass(already_traded: set, max_bet: float, dry_run: bool = False) -
         )
 
         already_traded.add(market["id"])
-        entered += 1
+        if filled:
+            entered += 1
 
     return entered, weather_condition_ids
 

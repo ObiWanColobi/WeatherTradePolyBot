@@ -4,12 +4,14 @@ Live Executor
 Real order execution on Polymarket via py-clob-client.
 Implements the same BaseExecutor interface as PaperExecutor.
 """
+import math
 import time
 from datetime import datetime, timezone
 
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import (
-    BalanceAllowanceParams, AssetType, OrderArgs, OrderType,
+    BalanceAllowanceParams, AssetType, OrderArgs, MarketOrderArgs, OrderType,
+    TradeParams,
 )
 from py_clob_client.order_builder.constants import BUY, SELL
 
@@ -79,16 +81,20 @@ class LiveExecutor(BaseExecutor):
         creds = self._client.create_or_derive_api_creds()
         self._client.set_api_creds(creds)
 
-        # Verify allowance — if 0, orders will silently fail
+        # Verify allowance — API returns "allowances" dict keyed by contract address
         bal_info = self._client.get_balance_allowance(
             BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
         )
-        allowance = int(bal_info.get("allowance", "0"))
-        if allowance == 0:
-            raise RuntimeError(
-                "CLOB allowance is 0 — run scripts/setup_allowances.py first. "
-                "Orders will fail without USDC approval on Polygon."
-            )
+        # Handle both response formats: "allowance" (single) or "allowances" (dict)
+        allowances = bal_info.get("allowances", {})
+        if allowances:
+            has_allowance = any(int(v) > 0 for v in allowances.values())
+        else:
+            has_allowance = int(bal_info.get("allowance", "0")) > 0
+
+        if not has_allowance:
+            print("[live] WARNING: No USDC allowance detected — first order may fail. "
+                  "Run scripts/setup_allowances.py if orders are rejected.")
 
         balance_usdc = int(bal_info.get("balance", "0")) / _USDC_DECIMALS
         print(f"[live] CLOB client initialized. Balance: ${balance_usdc:.2f} USDC")
@@ -113,25 +119,72 @@ class LiveExecutor(BaseExecutor):
 
     def _post_order(self, token_id: str, price: float, size: float,
                     side: str) -> dict | None:
-        """Sign and post an order to the CLOB. Returns response dict or None."""
+        """
+        Sign and post an order to the CLOB. Returns response dict or None.
+
+        For BUY orders, uses MarketOrderArgs with USDC amount (maker amount,
+        max 2 dp). For SELL orders, uses OrderArgs with shares (maker amount,
+        max 2 dp). This avoids floating-point precision issues where
+        price * shares produces too many decimal places.
+        """
         self._throttle_clob()
         clob_side = BUY if side == "BUY" else SELL
+        price = round(price, 2)
 
-        order_args = OrderArgs(
-            token_id=token_id,
-            price=price,
-            size=size,
-            side=clob_side,
-        )
+        # Sentinel for FOK rejections (thin book, not an API failure)
+        _FOK_REJECTED = {"_fok_rejected": True}
 
-        def _do_post():
-            signed = self._client.create_order(order_args)
-            response = self._client.post_order(signed, OrderType.FOK)
-            print(f"[live] Order posted: {response.get('orderID', '?')[:12]}  "
-                  f"status={response.get('status', '?')}")
-            return response
+        if side == "BUY":
+            # BUY: maker_amount = USDC to spend. Pass as amount, SDK derives shares.
+            amount = math.floor(size * price * 100) / 100  # USDC, truncate to 2 dp
+            order_args = MarketOrderArgs(
+                token_id=token_id,
+                price=price,
+                amount=amount,
+                side=clob_side,
+            )
+            print(f"[live] BUY order: price={price}, amount=${amount:.2f}, token={token_id[:12]}...")
 
-        return api_monitor.call("clob", _do_post)
+            def _do_post():
+                try:
+                    signed = self._client.create_market_order(order_args)
+                    response = self._client.post_order(signed, OrderType.FOK)
+                    print(f"[live] Order posted: {response.get('orderID', '?')[:12]}  "
+                          f"status={response.get('status', '?')}")
+                    return response
+                except Exception as e:
+                    if "fully filled" in str(e).lower():
+                        print(f"[live] FOK rejected — insufficient liquidity")
+                        return _FOK_REJECTED
+                    raise
+        else:
+            # SELL: maker_amount = shares to sell, truncate to 2 dp
+            size = math.floor(size * 100) / 100
+            order_args = OrderArgs(
+                token_id=token_id,
+                price=price,
+                size=size,
+                side=clob_side,
+            )
+            print(f"[live] SELL order: price={price}, shares={size}, token={token_id[:12]}...")
+
+            def _do_post():
+                try:
+                    signed = self._client.create_order(order_args)
+                    response = self._client.post_order(signed, OrderType.FOK)
+                    print(f"[live] Order posted: {response.get('orderID', '?')[:12]}  "
+                          f"status={response.get('status', '?')}")
+                    return response
+                except Exception as e:
+                    if "fully filled" in str(e).lower():
+                        print(f"[live] FOK rejected — insufficient liquidity")
+                        return _FOK_REJECTED
+                    raise
+
+        result = api_monitor.call("clob", _do_post)
+        if result is not None and result.get("_fok_rejected"):
+            return None
+        return result
 
     def _confirm_fill(self, order_id: str, token_id: str,
                       expected_price: float) -> tuple[float, float, float]:
@@ -141,15 +194,27 @@ class LiveExecutor(BaseExecutor):
         Returns:
             (fill_price, filled_shares, total_fee)
         """
-        for attempt in range(5):
+        saw_matched = False
+
+        for attempt in range(10):
             try:
                 self._throttle_clob()
                 order = self._client.get_order(order_id)
-                status = order.get("status", "")
+
+                if order is None:
+                    print(f"[live] Fill check attempt {attempt + 1}: order not found yet")
+                    if attempt < 9:
+                        time.sleep(3)
+                    continue
+
+                status = order.get("status", "").lower()
+                print(f"[live] Fill check attempt {attempt + 1}: status={status}")
 
                 if status in ("matched", "filled"):
-                    trades = order.get("associate_trades", [])
-                    if trades:
+                    saw_matched = True
+                    trades = order.get("associate_trades") or []
+                    # trades may be dicts with fill details or just ID strings
+                    if trades and isinstance(trades[0], dict):
                         total_cost = 0.0
                         total_shares = 0.0
                         total_fee = 0.0
@@ -163,23 +228,96 @@ class LiveExecutor(BaseExecutor):
                         avg_price = total_cost / total_shares if total_shares > 0 else expected_price
                         return avg_price, total_shares, total_fee
 
-                    # Matched but no trade details yet — use order-level fields
+                    # Use order-level fields (trade IDs only, or no details yet)
                     matched = float(order.get("size_matched", 0))
                     if matched > 0:
                         price = float(order.get("price", expected_price))
                         return price, matched, 0.0
 
-                if status in ("cancelled", "expired", "dead"):
+                    # Status is matched but no details yet — keep polling
+                    if attempt < 9:
+                        time.sleep(3)
+                    continue
+
+                if status == "delayed":
+                    # CLOB hasn't processed yet — keep polling
+                    if attempt < 9:
+                        time.sleep(3)
+                    continue
+
+                if status in ("cancelled", "expired", "dead", "canceled"):
                     return 0.0, 0.0, 0.0
 
             except Exception as e:
                 print(f"[live] Fill check attempt {attempt + 1} failed: {e}")
 
-            if attempt < 4:
-                time.sleep(2)
+            if attempt < 9:
+                time.sleep(3)
 
-        # Timeout — treat as unfilled
+        # Order showed matched/filled but trade details never populated.
+        # Fall back to get_trades() to find actual fills on this token.
+        if saw_matched:
+            result = self._lookup_buy_fills(token_id, order_id)
+            if result is not None:
+                return result
+            # Last resort: FOK matched = filled at the limit price.
+            # Use order-level price and amount to derive shares.
+            print(f"[live] Order {order_id[:12]} matched but no trade details — "
+                  f"using limit price {expected_price}")
+            try:
+                order = self._client.get_order(order_id)
+                if order:
+                    orig_amount = float(order.get("original_size", 0) or
+                                        order.get("size", 0) or 0)
+                    if orig_amount > 0:
+                        return expected_price, orig_amount, 0.0
+            except Exception:
+                pass
+
+        # Truly unfilled
         return 0.0, 0.0, 0.0
+
+    def _lookup_buy_fills(self, token_id: str, order_id: str
+                          ) -> tuple[float, float, float] | None:
+        """
+        Query CLOB trade history for BUY fills matching this order.
+        Returns (avg_price, total_shares, total_fee) or None if no fills found.
+        """
+        try:
+            self._throttle_clob()
+            result = self._client.get_trades(
+                TradeParams(asset_id=token_id)
+            )
+        except Exception as e:
+            print(f"[live] Trade history lookup failed for {token_id[:12]}: {e}")
+            return None
+
+        trades_list = result if isinstance(result, list) else (
+            result.get("data", []) if isinstance(result, dict) else []
+        )
+
+        total_cost = 0.0
+        total_shares = 0.0
+        total_fee = 0.0
+
+        for t in trades_list:
+            # Match by order_id if available
+            t_order = t.get("order_id") or t.get("orderId", "")
+            if t_order and t_order == order_id:
+                price = float(t.get("price", 0))
+                size = float(t.get("size", 0))
+                fee = float(t.get("fee", 0))
+                total_cost += price * size
+                total_shares += size
+                total_fee += fee
+
+        if total_shares > 0:
+            avg_price = total_cost / total_shares
+            print(f"[live] Found fills via trade history: "
+                  f"{total_shares:.2f} shares @ {avg_price:.4f}")
+            return avg_price, total_shares, total_fee
+
+        return None
 
     def _cancel_order(self, order_id: str):
         """Cancel an open order. Best-effort — logs but doesn't raise."""
@@ -194,39 +332,327 @@ class LiveExecutor(BaseExecutor):
     def reconcile_positions(self):
         """
         On restart, sync with exchange state:
-        1. Update DB balance to match exchange USDC balance
-        2. Log open positions being resumed
-        3. Warn about any discrepancies
+        1. Cancel any leftover open orders (prevent ghost fills while bot is down)
+        2. Update DB balance to match exchange USDC balance
+        3. Fetch actual positions from Polymarket and reconcile with DB
+        4. Import orphaned positions (exist on exchange but not in DB)
+        5. Auto-close stale DB positions (in DB but gone from exchange)
         """
+        # ── Cancel leftover orders ───────────────────────────────────────────
+        # Orders left on the book from a previous session can fill while the
+        # bot is down, creating orphaned positions and balance mismatches.
+        self._cancel_all_open_orders()
+
+        # ── Balance sync ─────────────────────────────────────────────────────
         exchange_balance = self._get_exchange_balance()
         db_balance = db.get_balance()
 
         if abs(exchange_balance - db_balance) > 0.01:
             print(f"[live] Balance sync: DB=${db_balance:.2f} → Exchange=${exchange_balance:.2f}")
             db.set_balance(exchange_balance)
+            # Reset balance history when switching from paper to live
+            # (paper history at $2000 distorts the chart)
+            from db import get_conn
+            with get_conn() as conn:
+                conn.execute("DELETE FROM balance_history")
+            db.record_account_value()
+            print(f"[live] Balance history reset for live mode.")
         else:
             print(f"[live] Balance in sync: ${exchange_balance:.2f}")
 
-        open_trades = db.get_open_trades()
-        if not open_trades:
-            print("[live] No open positions to resume.")
-            return
+        # ── Position reconciliation ──────────────────────────────────────────
+        # Fetch what Polymarket says we own
+        wallet_addr = WALLET_FUNDER_ADDRESS or self._client.get_address()
+        exchange_positions = polymarket.get_wallet_positions(wallet_addr)
 
-        print(f"[live] Resuming {len(open_trades)} open position(s):")
-        for t in open_trades:
-            print(f"       {t['direction']:3s}  {t['market_name'][:60]}  "
-                  f"fill={t['fill_price']:.4f}  size=${t['size_usdc']:.2f}")
+        if exchange_positions is None:
+            exchange_positions = []
+
+        # Build lookup of exchange positions by token_id
+        exchange_by_token = {}
+        for p in exchange_positions:
+            tid = p.get("token_id", "")
+            if tid and p.get("size", 0) > 0.01:
+                exchange_by_token[tid] = p
+
+        db_trades = db.get_open_trades()
+        db_token_ids = {t.get("token_id", "") for t in db_trades}
+
+        # Check for orphaned exchange positions (not in DB)
+        orphaned = []
+        for tid, pos in exchange_by_token.items():
+            if tid not in db_token_ids:
+                orphaned.append(pos)
+
+        if orphaned:
+            print(f"[live] Found {len(orphaned)} position(s) on exchange not in DB — importing:")
+            for pos in orphaned:
+                self._import_orphaned_position(pos)
+
+        # Auto-close stale DB positions (in DB but gone from exchange)
+        for t in db_trades:
+            tid = t.get("token_id", "")
+            if tid and tid not in exchange_by_token:
+                self._close_stale_position(t)
+
+        # Summary
+        db_trades = db.get_open_trades()  # re-fetch after imports
+        if not db_trades:
+            print("[live] No open positions to resume.")
+        else:
+            print(f"[live] Resuming {len(db_trades)} open position(s):")
+            for t in db_trades:
+                print(f"       {t['direction']:3s}  {t['market_name'][:60]}  "
+                      f"fill={t['fill_price']:.4f}  size=${t['size_usdc']:.2f}")
+
+    def _import_orphaned_position(self, pos: dict):
+        """Import a position that exists on exchange but not in DB.
+
+        Enriches the trade record with city, threshold, market URL,
+        volume, liquidity, and current ensemble snapshot from the
+        Polymarket APIs and forecast layer.
+        """
+        from layers.layer3_weather import parse_weather_market, WeatherLayer
+
+        token_id = pos.get("token_id", "")
+        market_id = pos.get("market_id", "")
+        shares = pos.get("size", 0)
+        avg_price = pos.get("avg_price", 0)
+        current_price = pos.get("current_price", 0)
+
+        # Fetch market details from Gamma API
+        market_info = polymarket.get_market_by_id(market_id) if market_id else None
+        question   = ""
+        end_date   = ""
+        market_url = ""
+        liquidity  = None
+        volume     = None
+        yes_price  = 0.5
+
+        if market_info:
+            question   = market_info.get("question", "")
+            end_date   = market_info.get("end_date", "")
+            market_url = market_info.get("market_url", "")
+            liquidity  = market_info.get("liquidity")
+            volume     = market_info.get("volume")
+            yes_price  = market_info.get("price") or 0.5
+
+        # Determine direction from outcome field or token matching
+        outcome = pos.get("outcome", "").upper()
+        if outcome in ("YES", "NO"):
+            direction = outcome
+        else:
+            if market_info and token_id == market_info.get("token_id"):
+                direction = "YES"
+            else:
+                direction = "NO"
+
+        # Parse city and threshold from the question string
+        city = None
+        threshold_str = None
+        parsed = parse_weather_market(question) if question else None
+        if parsed:
+            city = parsed["city_raw"].title()
+            if parsed["market_type"] == "threshold":
+                op = ">=" if parsed["direction"] == "above" else "<="
+                threshold_str = f"{op}{parsed['threshold']:.0f}{parsed['unit']}"
+
+        # Snapshot current ensemble as entry baseline
+        ens_pct = None
+        ens_yes = None
+        ens_n   = None
+        if market_info and question:
+            try:
+                layer = WeatherLayer()
+                scan_data = layer.scan({
+                    "question": question,
+                    "end_date": end_date,
+                    "price":    yes_price,
+                })
+                if scan_data and scan_data.get("ensemble_n", 0) >= 10:
+                    ens_yes = scan_data.get("yes_ensemble")
+                    ens_n   = scan_data.get("ensemble_n")
+                    ens_pct = ens_yes / ens_n if ens_yes is not None and ens_n else None
+            except Exception as e:
+                print(f"       [reconcile] ensemble snapshot failed: {e}")
+
+        entry_price = yes_price
+        model_prob = None
+        edge_score = None
+
+        size_usdc = shares * avg_price if avg_price > 0 else shares * current_price
+
+        trade = {
+            "market_id":       market_id,
+            "market_name":     question,
+            "token_id":        token_id,
+            "end_date":        end_date,
+            "direction":       direction,
+            "size_usdc":       round(size_usdc, 2),
+            "shares":          shares,
+            "entry_price":     entry_price,
+            "fill_price":      avg_price,
+            "current_price":   current_price,
+            "peak_price":      current_price,
+            "exit_price":      None,
+            "opened_at":       datetime.now(timezone.utc).isoformat(),
+            "hours_to_close_at_entry": _hours_until(end_date),
+            "closed_at":       None,
+            "status":          "open",
+            "pnl":             None,
+            "pnl_pct":         None,
+            "layers_used":     "reconciled",
+            "estimated_prob":  model_prob,
+            "edge_score":      edge_score,
+            "liquidity":       liquidity,
+            "volume_24h":      volume,
+            "city":            city,
+            "entry_ensemble_pct": ens_pct,
+            "entry_ensemble_yes": ens_yes,
+            "entry_ensemble_n":   ens_n,
+            "market_url":      market_url,
+            "threshold":       threshold_str,
+            "bleed_rungs_hit": 0,
+            "exit_reason":     None,
+            "order_id":        None,
+            "fee_usdc":        0.0,
+        }
+
+        db.insert_trade(trade)
+        city_display = city or "?"
+        ens_str = f"{int(ens_yes)}/{ens_n}" if ens_yes is not None and ens_n else "?"
+        print(f"       IMPORTED: {direction:3s}  {city_display:<12}  {threshold_str or '?':<8}  "
+              f"ens={ens_str}  {question[:40]}  shares={shares:.2f}  avg=${avg_price:.4f}")
+
+    def _close_stale_position(self, trade: dict):
+        """
+        Close a DB position that no longer exists on the exchange.
+
+        Queries CLOB trade history to find the actual sell fills and compute
+        real P&L. Falls back to midpoint estimate if no trade history found.
+        """
+        tid      = trade.get("token_id", "")
+        trade_id = trade["id"]
+        name     = trade["market_name"][:50]
+        cost     = trade.get("size_usdc", 0)
+
+        # Try to find actual sell trades from CLOB history
+        exit_price, proceeds, fee = self._lookup_sell_fills(tid, trade)
+
+        if proceeds is not None:
+            pnl     = proceeds - cost - fee
+            pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
+            source  = "trade history"
+        else:
+            # Fallback: no trade history found. Use current midpoint as estimate.
+            mid = polymarket.get_midpoint(tid)
+            if mid is not None and mid > 0:
+                exit_price = mid
+                proceeds   = trade.get("shares", 0) * mid
+            else:
+                exit_price = 0.0
+                proceeds   = 0.0
+            fee     = 0.0
+            pnl     = proceeds - cost
+            pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
+            source  = "midpoint estimate"
+
+        db.update_trade(trade_id, {
+            "exit_price":             exit_price,
+            "closed_at":              datetime.now(timezone.utc).isoformat(),
+            "status":                 "closed",
+            "pnl":                    pnl,
+            "pnl_pct":                pnl_pct,
+            "exit_reason":            "sold externally (reconciled)",
+            "hours_to_close_at_exit": _hours_until(trade.get("end_date")),
+            "fee_usdc":               (trade.get("fee_usdc") or 0) + fee,
+        })
+        db.record_account_value()
+
+        print(f"[live] AUTO-CLOSED trade #{trade_id} ({name})")
+        print(f"       P&L: ${pnl:+.2f} ({pnl_pct:+.1f}%)  source={source}")
+
+        notify("warning", "Position Reconciled",
+               f"Trade #{trade_id} gone from exchange — auto-closed",
+               fields={"Market": name, "P&L": f"${pnl:+.2f}", "Source": source},
+               color=COLOR_GREEN)
+
+    def _lookup_sell_fills(self, token_id: str, trade: dict
+                           ) -> tuple[float | None, float | None, float]:
+        """
+        Query CLOB trade history for sell fills on this token.
+
+        Returns (avg_exit_price, total_proceeds, total_fee) or (None, None, 0)
+        if no relevant sells found.
+        """
+        try:
+            self._throttle_clob()
+            result = self._client.get_trades(
+                TradeParams(asset_id=token_id)
+            )
+        except Exception as e:
+            print(f"[live] Could not fetch trade history for {token_id[:12]}: {e}")
+            return None, None, 0.0
+
+        # result may be a list or have a "data" key
+        trades_list = result if isinstance(result, list) else (
+            result.get("data", []) if isinstance(result, dict) else []
+        )
+
+        # Filter to SELL trades that happened after the position was opened
+        opened_at = trade.get("opened_at", "")
+        total_proceeds = 0.0
+        total_shares   = 0.0
+        total_fee      = 0.0
+
+        for t in trades_list:
+            side = (t.get("side") or t.get("type", "")).upper()
+            if side != "SELL":
+                continue
+
+            # Only count sells after position open time
+            trade_ts = t.get("timestamp") or t.get("created_at", "")
+            if opened_at and trade_ts and str(trade_ts) < opened_at:
+                continue
+
+            price  = float(t.get("price", 0))
+            size   = float(t.get("size", 0))
+            fee    = float(t.get("fee", 0))
+            total_proceeds += price * size
+            total_shares   += size
+            total_fee      += fee
+
+        if total_shares <= 0:
+            return None, None, 0.0
+
+        avg_price = total_proceeds / total_shares
+        return avg_price, total_proceeds, total_fee
+
+    def _cancel_all_open_orders(self):
+        """Cancel all open orders on startup to prevent ghost fills."""
+        try:
+            self._throttle_clob()
+            result = self._client.cancel_market_orders()
+            # Result format varies — may be list of cancelled IDs or a status dict
+            if result:
+                cancelled = result if isinstance(result, list) else result.get("canceled", [])
+                if cancelled:
+                    print(f"[live] Startup: cancelled {len(cancelled)} leftover order(s)")
+                    return
+            print("[live] Startup: no leftover orders to cancel.")
+        except Exception as e:
+            print(f"[live] Startup: cancel open orders failed: {e}")
 
     # ── Order placement ──────────────────────────────────────────────────────
 
-    def place_order(self, market: dict, direction: str, size_usdc: float, estimate: dict):
+    def place_order(self, market: dict, direction: str, size_usdc: float, estimate: dict) -> bool:
         balance = db.get_balance()
         if size_usdc > balance:
             print(f"[live] Skipping — insufficient balance ${balance:.2f} < ${size_usdc:.2f}")
-            return
+            return False
 
         if db.get_open_trade_for_market(market["id"]):
-            return
+            return False
 
         # Select token — YES buys YES token, NO buys NO token
         if direction == "YES":
@@ -235,21 +661,22 @@ class LiveExecutor(BaseExecutor):
             token_id = market.get("no_token_id") or market.get("token_id")
 
         if not token_id:
-            return
+            return False
 
         # Get current best ask to set limit price
         mid = polymarket.get_midpoint(token_id)
         if mid is None or mid <= 0:
             print(f"[live] Skipping — no midpoint for {market.get('question', '')[:50]}")
-            return
+            return False
 
         # Place a FOK order at slightly above mid for fast fill
+        # CLOB requires: price max 2 decimals, shares (taker amount) max 4 decimals
         limit_price = round(min(mid + 0.01, 0.99), 2)
-        shares = size_usdc / limit_price
+        shares = math.floor(size_usdc / limit_price * 100) / 100  # truncate to 2 dp (CLOB requirement)
 
         order_response = self._post_order(token_id, limit_price, shares, "BUY")
         if order_response is None:
-            return
+            return False
 
         order_id = order_response.get("orderID", "")
 
@@ -258,7 +685,7 @@ class LiveExecutor(BaseExecutor):
         if filled_shares <= 0:
             print(f"[live] Order {order_id[:12]} not filled — cancelling")
             self._cancel_order(order_id)
-            return
+            return False
 
         filled_usdc = filled_shares * fill_price
 
@@ -323,6 +750,7 @@ class LiveExecutor(BaseExecutor):
                         "Size": f"${filled_usdc:.2f}",
                         "Shares": f"{filled_shares:.1f}"},
                color=COLOR_GREEN)
+        return True
 
     # ── Extended position add-on ─────────────────────────────────────────────
 
@@ -361,7 +789,7 @@ class LiveExecutor(BaseExecutor):
             print(f"[live] Skipping add-on — slippage too high even at 25% size")
             return
 
-        shares = size_usdc / limit_price
+        shares = math.floor(size_usdc / limit_price * 100) / 100  # truncate to 2 dp (CLOB requirement)
 
         order_response = self._post_order(token_id, limit_price, shares, "BUY")
         if order_response is None:
@@ -760,7 +1188,10 @@ class LiveExecutor(BaseExecutor):
         """
         Refresh current_price, peak_price, and liquidity for every open position.
         Uses CLOB midpoint for price, Gamma API for liquidity/volume.
+        Also backfills missing city/threshold/market_url for reconciled positions.
         """
+        from layers.layer3_weather import parse_weather_market, WeatherLayer
+
         open_trades = db.get_open_trades()
         for trade in open_trades:
             new_price = self._fetch_current_price(trade)
@@ -780,6 +1211,42 @@ class LiveExecutor(BaseExecutor):
                     updates["volume_24h"] = vol
                 if not trade.get("market_url") and market.get("market_url"):
                     updates["market_url"] = market["market_url"]
+                if not trade.get("market_name") and market.get("question"):
+                    updates["market_name"] = market["question"]
+                if not trade.get("end_date") and market.get("end_date"):
+                    updates["end_date"] = market["end_date"]
+
+            # Backfill city/threshold from question if missing (reconciled trades)
+            question = trade.get("market_name") or (market.get("question", "") if market else "")
+            if question and (not trade.get("city") or not trade.get("threshold")):
+                parsed = parse_weather_market(question)
+                if parsed:
+                    if not trade.get("city"):
+                        updates["city"] = parsed["city_raw"].title()
+                    if not trade.get("threshold") and parsed["market_type"] == "threshold":
+                        op = ">=" if parsed["direction"] == "above" else "<="
+                        updates["threshold"] = f"{op}{parsed['threshold']:.0f}{parsed['unit']}"
+
+            # Backfill ensemble for reconciled trades that have none
+            if trade.get("entry_ensemble_n") is None and question and market:
+                try:
+                    layer = WeatherLayer()
+                    scan_data = layer.scan({
+                        "question": question,
+                        "end_date": market.get("end_date", ""),
+                        "price":    market.get("price") or 0.5,
+                    })
+                    if scan_data and scan_data.get("ensemble_n", 0) >= 10:
+                        ens_yes = scan_data.get("yes_ensemble")
+                        ens_n   = scan_data.get("ensemble_n")
+                        ens_pct = ens_yes / ens_n if ens_yes is not None and ens_n else None
+                        updates["entry_ensemble_yes"] = ens_yes
+                        updates["entry_ensemble_n"]   = ens_n
+                        updates["entry_ensemble_pct"] = ens_pct
+                        print(f"[backfill] ensemble for trade #{trade['id']}: "
+                              f"{int(ens_yes)}/{ens_n}")
+                except Exception as e:
+                    print(f"[backfill] ensemble failed for trade #{trade['id']}: {e}")
 
             db.update_trade(trade["id"], updates)
 

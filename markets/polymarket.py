@@ -282,50 +282,97 @@ def get_wallet_positions(address: str) -> list[dict]:
     return result
 
 
+def _parse_gamma_market(m: dict) -> dict | None:
+    """Parse a Gamma API market object into our standard dict."""
+    outcomes  = _parse_json_field(m.get("outcomes", "[]"))
+    prices    = _parse_json_field(m.get("outcomePrices", "[]"))
+    token_ids = _parse_json_field(m.get("clobTokenIds", "[]"))
+
+    yes_idx = next((i for i, o in enumerate(outcomes) if str(o).lower() == "yes"), None)
+    if yes_idx is None or yes_idx >= len(prices):
+        return None
+
+    price    = float(prices[yes_idx])
+    token_id = token_ids[yes_idx] if yes_idx < len(token_ids) else None
+
+    events = m.get("events") or []
+    event_slug = events[0].get("slug") if events else None
+    slug = event_slug or m.get("slug") or ""
+    return {
+        "id":         m.get("conditionId") or m.get("id"),
+        "question":   m.get("question", ""),
+        "token_id":   token_id,
+        "price":      price,
+        "liquidity":  float(m.get("liquidityNum") or m.get("liquidity") or 0),
+        "volume":     float(m.get("volume24hr") or m.get("volumeNum") or 0),
+        "end_date":   m.get("endDateIso") or m.get("endDate"),
+        "resolved":   m.get("closed", False),
+        "market_url": f"https://polymarket.com/event/{slug}" if slug else "",
+    }
+
+
+def _clob_fallback(market_id: str) -> dict | None:
+    """Fallback: CLOB → full token ID → Gamma bulk lookup with event slug."""
+    try:
+        resp = requests.get(
+            f"{POLYMARKET_CLOB_API}/markets/{market_id}",
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return None
+        clob = resp.json()
+        tokens = clob.get("tokens", [])
+        yes_tok = next((t for t in tokens if (t.get("outcome") or "").upper() == "YES"), None)
+        if not yes_tok:
+            return None
+        full_token_id = yes_tok["token_id"]
+
+        gamma_resp = _session.get(
+            f"{POLYMARKET_GAMMA_API}/markets",
+            params={"clob_token_ids": full_token_id},
+            timeout=10,
+        )
+        if gamma_resp.status_code == 200:
+            data = gamma_resp.json()
+            if isinstance(data, list) and data:
+                result = _parse_gamma_market(data[0])
+                if result:
+                    return result
+
+        # Gamma bulk also failed — build minimal record from CLOB data
+        question = clob.get("question", "")
+        market_slug = clob.get("market_slug", "")
+        return {
+            "id":         clob.get("condition_id") or market_id,
+            "question":   question,
+            "token_id":   full_token_id,
+            "price":      None,
+            "liquidity":  0,
+            "volume":     0,
+            "end_date":   clob.get("end_date_iso"),
+            "resolved":   clob.get("closed", False),
+            "market_url": f"https://polymarket.com/event/{market_slug}" if market_slug else "",
+        }
+    except Exception:
+        return None
+
+
 def get_market_by_id(market_id: str) -> dict | None:
     """Fetch a single market by condition ID. Used for ensemble and resolver checks."""
     try:
-        # Use the conditionId directly as a path segment.
-        # The ?conditionId= query-param approach does not filter — it silently
-        # returns unrelated markets, so we use the REST path instead.
         resp = _session.get(
             f"{POLYMARKET_GAMMA_API}/markets/{market_id}",
             timeout=10,
         )
         resp.raise_for_status()
         data = resp.json()
-        # Path endpoint returns a single object; bulk endpoint returns a list.
         m = data[0] if isinstance(data, list) and data else data
         if not m or not isinstance(m, dict):
-            return None
-
-        outcomes  = _parse_json_field(m.get("outcomes", "[]"))
-        prices    = _parse_json_field(m.get("outcomePrices", "[]"))
-        token_ids = _parse_json_field(m.get("clobTokenIds", "[]"))
-
-        yes_idx = next((i for i, o in enumerate(outcomes) if str(o).lower() == "yes"), None)
-        if yes_idx is None or yes_idx >= len(prices):
-            return None
-
-        price    = float(prices[yes_idx])
-        token_id = token_ids[yes_idx] if yes_idx < len(token_ids) else None
-
-        events = m.get("events") or []
-        event_slug = events[0].get("slug") if events else None
-        slug = event_slug or m.get("slug") or ""
-        return {
-            "id":         m.get("conditionId") or m.get("id"),
-            "question":   m.get("question", ""),
-            "token_id":   token_id,
-            "price":      price,
-            "liquidity":  float(m.get("liquidityNum") or m.get("liquidity") or 0),
-            "volume":     float(m.get("volume24hr") or m.get("volumeNum") or 0),
-            "end_date":   m.get("endDateIso") or m.get("endDate"),
-            "resolved":   m.get("closed", False),
-            "market_url": f"https://polymarket.com/event/{slug}" if slug else "",
-        }
+            return _clob_fallback(market_id)
+        result = _parse_gamma_market(m)
+        return result if result else _clob_fallback(market_id)
     except Exception:
-        return None
+        return _clob_fallback(market_id)
 
 
 def get_market_tokens(condition_id: str) -> dict | None:

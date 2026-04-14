@@ -33,10 +33,8 @@ Forecast horizon discount:
 from config import WEATHER
 
 
-# -- Config -------------------------------------------------------------------
+# -- Config (read at call time so live overrides take effect) -----------------
 _KELLY_FRACTION         = WEATHER.get("kelly_fraction",                 0.50)   # half-Kelly
-_MAX_BET_USDC           = WEATHER.get("kelly_max_bet_usdc",           200.00)   # hard cap per trade
-_MAX_BET_USDC_UNANIMOUS = WEATHER.get("kelly_max_bet_usdc_unanimous",  50.00)   # cap for unanimous-weak trades
 _MIN_BET_USDC           = WEATHER.get("kelly_min_bet_usdc",             5.00)   # ignore sub-threshold signals
 _MAX_BALANCE_PCT        = WEATHER.get("kelly_max_balance_pct",          0.10)   # never risk >10% of balance
 
@@ -99,8 +97,10 @@ def kelly_size(
     fraction = kelly * _KELLY_FRACTION
     size     = fraction * balance
 
-    # Hard caps — unanimous-weak trades use a separate, smaller cap
-    cap  = _MAX_BET_USDC_UNANIMOUS if unanimous else _MAX_BET_USDC
+    # Hard caps — read at call time so live overrides are respected
+    max_bet           = WEATHER.get("kelly_max_bet_usdc",           200.00)
+    max_bet_unanimous = WEATHER.get("kelly_max_bet_usdc_unanimous",  50.00)
+    cap  = max_bet_unanimous if unanimous else max_bet
     size = min(size, cap)
     size = min(size, balance * _MAX_BALANCE_PCT)
     size = max(size, 0.0)

@@ -252,16 +252,24 @@ with st.sidebar:
 unrealized    = sum(_unreal_pnl(t) for t in open_trades)
 position_val  = sum((t.get("current_price") or t["fill_price"]) * t["shares"] for t in open_trades)
 account_value = cash + position_val
-acct_pnl      = account_value - PAPER_STARTING_BALANCE
-acct_pnl_pct  = (acct_pnl / PAPER_STARTING_BALANCE * 100) if PAPER_STARTING_BALANCE else 0
+# In live mode, use the earliest recorded balance as baseline instead of paper starting balance
+if TRADING_MODE == "live":
+    _history = db.get_balance_history()
+    _start_balance = _history[0]["amount"] if _history else account_value
+else:
+    _start_balance = PAPER_STARTING_BALANCE
+
+acct_pnl      = account_value - _start_balance
+acct_pnl_pct  = (acct_pnl / _start_balance * 100) if _start_balance else 0
 realized_pnl  = stats["total_pnl"]
-realized_pct  = (realized_pnl / PAPER_STARTING_BALANCE * 100) if PAPER_STARTING_BALANCE else 0
+realized_pct  = (realized_pnl / _start_balance * 100) if _start_balance else 0
 today_str     = datetime.now(timezone.utc).date().isoformat()
 trades_today  = sum(1 for t in all_trades if (t.get("opened_at") or "").startswith(today_str))
 
 # ── Header ────────────────────────────────────────────────────────────────────
 
-st.title("🌤️ Weather Trading Bot — Paper Mode")
+_mode_title = "Live Mode" if TRADING_MODE == "live" else "Paper Mode"
+st.title(f"🌤️ Weather Trading Bot — {_mode_title}")
 st.caption(f"Auto-refreshes every {REFRESH_INTERVAL}s · last loaded {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
 
 # ── Bot status banner ─────────────────────────────────────────────────────────
@@ -327,18 +335,33 @@ if _risk_status["state"] == "HALTED" and not _risk_status["overridden"]:
 
 # ── Notification Feed ─────────────────────────────────────────────────────────
 
-if "dismissed_before" not in st.session_state:
-    st.session_state.dismissed_before = None
+_DISMISS_FILE = Path(__file__).parent.parent / "data" / "dismissed_alerts.txt"
 
+def _load_dismissed_before() -> str | None:
+    try:
+        return _DISMISS_FILE.read_text().strip() or None
+    except FileNotFoundError:
+        return None
+
+def _save_dismissed_before(ts: str):
+    _DISMISS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _DISMISS_FILE.write_text(ts)
+
+if "dismissed_before" not in st.session_state:
+    st.session_state.dismissed_before = _load_dismissed_before()
+
+_MAX_ALERTS = 5
 _notif_rows = db.get_notifications(
     severity_in=["critical", "warning"],
-    limit=20,
+    limit=_MAX_ALERTS,
     since=st.session_state.dismissed_before,
 )
 if _notif_rows:
     with st.expander(f"⚠️ Alerts ({len(_notif_rows)})", expanded=True):
         if st.button("Dismiss All"):
-            st.session_state.dismissed_before = datetime.now(timezone.utc).isoformat()
+            ts = datetime.now(timezone.utc).isoformat()
+            st.session_state.dismissed_before = ts
+            _save_dismissed_before(ts)
             st.rerun()
         for row in _notif_rows:
             icon = "🔴" if row["severity"] == "critical" else "🟡"
@@ -384,8 +407,8 @@ if balance_hist:
         hovertemplate="%{x|%Y-%m-%d %H:%M}<br>$%{y:,.2f}<extra></extra>",
     ))
     fig.add_hline(
-        y=PAPER_STARTING_BALANCE, line_dash="dash", line_color="gray",
-        annotation_text=f"Start ${PAPER_STARTING_BALANCE:,.0f}",
+        y=_start_balance, line_dash="dash", line_color="gray",
+        annotation_text=f"Start ${_start_balance:,.0f}",
     )
     fig.update_layout(
         height=260, margin=dict(l=0, r=0, t=10, b=0),
