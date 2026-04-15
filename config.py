@@ -117,6 +117,9 @@ WEATHER = {
     "exit_late_game_market_floor":       0.40,  # exit if our token drops below this
     "exit_late_game_ensemble_threshold": 0.70,  # ...AND ensemble still shows >= this conviction for us
 
+    # ── Resilient exit execution (2026-04-15) ────────────────────────────────
+    "exit_reprice_min_step":  0.01,   # minimum price drop per reprice cycle (GTC exit orders)
+
     # ╔═══════════════════════════════════════════════════════════════════════════╗
     # ║  KELLY POSITION SIZING                    [paper defaults, see Live      ║
     # ║  Half-Kelly with hard caps                 Overrides section for live]   ║
