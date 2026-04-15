@@ -5,14 +5,15 @@ Exit logic for same-day weather markets. Fundamentally different from
 the general exit manager — default is to HOLD to resolution, not ladder out.
 
 Exit triggers (checked in priority order):
-  1. Ensemble flip  — new model run shifts consensus >25pts from entry signal
-  2. Price adverse  — market price moves >15c against position (crowd knows something)
-  3. Within 2h close — never exit in final 2 hours (ride it out)
+  1. Ensemble flip             — new model run shifts consensus >25pts from entry signal
+  2. Late-game divergence      — within 8h of close, our token < 40% yet ensemble >= 70% (stale forecast)
+  3. Price adverse             — market price moves significantly against position (crowd knows something)
 
 What we deliberately do NOT do:
   - Bleed-off ladders (leaving money on the table before resolution)
   - Trailing stops (too short a time horizon for meaningful price recovery)
   - Edge exhaustion exits (market correcting toward your price = hold, not exit)
+  - Blanket final-hour lock (removed 2026-04-15 — the late-game divergence check now covers this window)
 """
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -26,7 +27,10 @@ _ADVERSE_PRICE_MOVE_PCT   = WEATHER.get("exit_adverse_price_move_pct",    0.30)
 _ADVERSE_MIN_MOVE         = WEATHER.get("exit_adverse_min_move_cents",    0.10)
 _ADVERSE_MIN_HOLD_MINUTES = WEATHER.get("exit_adverse_min_hold_minutes",  60)
 _ADVERSE_SKIP_UNANIMOUS   = WEATHER.get("exit_adverse_skip_unanimous_pct", 0.90)
-_NO_EXIT_HOURS            = WEATHER.get("exit_no_exit_hours_to_close",    2.0)
+# Late-game market divergence (2026-04-15) — replaces blanket 2h exit lock
+_LATE_GAME_HOURS          = WEATHER.get("exit_late_game_hours",              8.0)
+_LATE_GAME_MARKET_FLOOR   = WEATHER.get("exit_late_game_market_floor",       0.40)
+_LATE_GAME_ENS_THRESHOLD  = WEATHER.get("exit_late_game_ensemble_threshold", 0.70)
 
 
 @dataclass
@@ -48,16 +52,9 @@ def check_weather_exit(trade: dict, market_data: dict, current_ensemble_pct: flo
     Returns:
         WeatherExitSignal — should_exit=False means hold.
     """
-
-    # ── Never exit within 2 hours of resolution ───────────────────────────────
-    # Use the trade's stored end_date (validated at entry time) rather than
-    # re-fetching from the API, which can return a different field or stale value.
-    hours_left = _hours_to_close(trade.get("end_date") or market_data.get("end_date", ""))
-    if hours_left is not None and hours_left <= _NO_EXIT_HOURS:
-        return WeatherExitSignal(
-            should_exit=False,
-            reason=f"within {_NO_EXIT_HOURS}h of close — holding to resolution",
-        )
+    # Hours remaining until market closes — used by the late-game divergence check
+    # and read from the trade's stored end_date to avoid stale API re-fetches.
+    hours_left    = _hours_to_close(trade.get("end_date") or market_data.get("end_date", ""))
 
     fill_price    = trade.get("fill_price", 0.5)
 
@@ -93,7 +90,35 @@ def check_weather_exit(trade: dict, market_data: dict, current_ensemble_pct: flo
                     urgent=True,
                 )
 
-    # ── 2. Adverse price move ─────────────────────────────────────────────────
+    # ── 2. Late-game market divergence (2026-04-15) ───────────────────────────
+    # In the final hours, if our token price has collapsed but the ensemble
+    # still shows strong conviction for us, the ensemble is stale and the
+    # market is already pricing the true outcome. Exit before resolution.
+    if (
+        hours_left is not None
+        and hours_left <= _LATE_GAME_HOURS
+        and current_price is not None
+        and current_ensemble_pct is not None
+    ):
+        trade_dir = (trade.get("direction") or "").lower()
+        ens_conviction_for_us = (
+            current_ensemble_pct if trade_dir == "yes" else (1.0 - current_ensemble_pct)
+        )
+        if (
+            current_price < _LATE_GAME_MARKET_FLOOR
+            and ens_conviction_for_us >= _LATE_GAME_ENS_THRESHOLD
+        ):
+            return WeatherExitSignal(
+                should_exit=True,
+                reason=(
+                    f"late-game market divergence — {hours_left:.1f}h left, "
+                    f"token at {current_price:.1%}, ensemble still "
+                    f"{ens_conviction_for_us:.0%} conviction (stale forecast)"
+                ),
+                urgent=True,
+            )
+
+    # ── 3. Adverse price move ─────────────────────────────────────────────────
     # Both YES and NO use the same formula: fill_price - current_price.
     # YES: token price falling after entry is adverse.
     # NO:  token price falling after entry is adverse (crowd shifting away from NO).
