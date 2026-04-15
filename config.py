@@ -17,6 +17,7 @@ WALLET_FUNDER_ADDRESS = os.getenv("WALLET_FUNDER_ADDRESS", "")
 
 # ── Paper Trading ─────────────────────────────────────────────────────────────
 PAPER_STARTING_BALANCE = 2000.00   # USDC
+LIVE_STARTING_BALANCE  = 200.00    # USDC — actual funded amount when live trading began
 
 # ── Market Filters (used by Polymarket API fetcher) ───────────────────────────
 MIN_LIQUIDITY_USDC = 1000

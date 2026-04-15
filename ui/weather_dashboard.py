@@ -22,7 +22,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import db
-from config import WEATHER, PAPER_STARTING_BALANCE, TRADING_MODE
+from config import WEATHER, PAPER_STARTING_BALANCE, LIVE_STARTING_BALANCE, TRADING_MODE
 from weather_risk import RiskManager
 from executor import create_executor
 from notifications import notify
@@ -261,10 +261,8 @@ unrealized    = sum(_unreal_pnl(t) for t in open_trades)
 position_val  = sum((t.get("current_price") or t["fill_price"]) * t["shares"] for t in open_trades)
 pending_val   = sum(t["shares"] for t in pending_trades)
 account_value = cash + position_val + pending_val
-# In live mode, use the earliest recorded balance as baseline instead of paper starting balance
 if TRADING_MODE == "live":
-    _history = db.get_balance_history()
-    _start_balance = _history[0]["amount"] if _history else account_value
+    _start_balance = LIVE_STARTING_BALANCE
 else:
     _start_balance = PAPER_STARTING_BALANCE
 

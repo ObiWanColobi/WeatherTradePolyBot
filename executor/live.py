@@ -351,13 +351,7 @@ class LiveExecutor(BaseExecutor):
         if abs(exchange_balance - db_balance) > 0.01:
             print(f"[live] Balance sync: DB=${db_balance:.2f} → Exchange=${exchange_balance:.2f}")
             db.set_balance(exchange_balance)
-            # Reset balance history when switching from paper to live
-            # (paper history at $2000 distorts the chart)
-            from db import get_conn
-            with get_conn() as conn:
-                conn.execute("DELETE FROM balance_history")
             db.record_account_value()
-            print(f"[live] Balance history reset for live mode.")
         else:
             print(f"[live] Balance in sync: ${exchange_balance:.2f}")
 
