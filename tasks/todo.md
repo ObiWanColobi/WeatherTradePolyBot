@@ -5,7 +5,7 @@ start-of-session roadmap plus ongoing gaps.
 
 ---
 
-## 2026-04-14 — Closed-position tracking + claim-error fix (IN PROGRESS)
+## 2026-04-14 — Closed-position tracking + claim-error fix (CODE COMPLETE, pushed a7caf6a)
 
 ### Problem
 Cloud bot (Kamatera, `weatherbot.service`) had 2 expired trades that vanished
@@ -58,14 +58,13 @@ from "Open Positions" and never appeared in "Trade History". Log showed:
       `reconcile_positions`. If duplicates are found, reconcile aborts and
       fires a **critical** notification rather than silently continuing.
 
-### DB cleanup (waiting on user)
-- [ ] Receive fresh DB copy from user
-- [ ] `DELETE FROM trades WHERE id IN (9, 10);` (confirmed dupes of #2, #5)
-- [ ] `UPDATE trades SET claim_retries = 0, claim_last_attempt = NULL,
-      claim_next_retry = NULL WHERE id IN (2, 5);`
-- [ ] Run `python -c "import db; db.init_db()"` to verify partial unique
-      index creates cleanly (no IntegrityError warning)
-- [ ] Sanity check: no duplicate `token_id` in `status IN ('open','claim_pending')`
+### DB cleanup
+- [x] Receive fresh DB copy from user
+- [x] `DELETE FROM trades WHERE id IN (9, 10);` (confirmed dupes of #2, #5)
+- [x] `UPDATE trades SET claim_retries = 0, claim_last_attempt = NULL WHERE id IN (2, 5);`
+- [x] Run `init_db()` — partial unique index created cleanly (no IntegrityError)
+- [x] Sanity check: no duplicate parent `token_id` in active rows
+- [x] Note: index excludes `parent_trade_id IS NOT NULL` (extended legs share token_id legitimately — rows #4/#8 Tel Aviv)
 
 ### Deploy
 - [ ] User uploads cleaned DB to Kamatera `/opt/tradebot0/weather_bot.db`
