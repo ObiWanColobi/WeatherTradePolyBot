@@ -107,8 +107,15 @@ WEATHER = {
     "exit_adverse_price_move_pct":      0.30,  # exit if price moves >30% of fill against position
     "exit_adverse_min_move_cents":      0.10,  # floor: never exit on moves smaller than 10 cents (prevents noise exits on cheap tokens)
     "exit_adverse_min_hold_minutes":    60,    # no adverse exit within first 60 min (post-entry price settling)
-    "exit_adverse_skip_unanimous_pct":  .9,  # skip adverse exit when ensemble conviction >= 90% (trust the model)
-    "exit_no_exit_hours_to_close":      2.0,   # never exit within 2h of resolution
+    "exit_adverse_skip_unanimous_pct":  .9,    # skip adverse exit when ensemble conviction >= 90% (trust the model)
+
+    # ── Late-game market divergence exit (2026-04-15) ─────────────────────────
+    # In the final hours before close, if our token price has collapsed but the
+    # ensemble still shows high conviction for us, the ensemble is stale and the
+    # market is already pricing the true outcome — exit.
+    "exit_late_game_hours":              8.0,   # window: last 8h before close
+    "exit_late_game_market_floor":       0.40,  # exit if our token drops below this
+    "exit_late_game_ensemble_threshold": 0.70,  # ...AND ensemble still shows >= this conviction for us
 
     # ╔═══════════════════════════════════════════════════════════════════════════╗
     # ║  KELLY POSITION SIZING                    [paper defaults, see Live      ║
