@@ -1014,6 +1014,53 @@ class LiveExecutor(BaseExecutor):
         for leg in legs:
             self.close_full(leg, reason=reason)
 
+    def initiate_exit(self, trade: dict, reason: str):
+        """Post a GTC sell to begin exiting a position. Tracks order across cycles."""
+        parent_id = trade.get("parent_trade_id") or trade["id"]
+        legs = db.get_position_legs(parent_id)
+        if not legs:
+            legs = [trade]
+
+        token_id = trade.get("token_id")
+        if not token_id:
+            print(f"[live] Cannot initiate exit — no token_id for {trade['market_name'][:50]}")
+            return
+
+        total_shares = sum(leg.get("shares", 0) for leg in legs)
+        if total_shares <= 0:
+            return
+
+        best_bid = polymarket.get_best_bid(token_id)
+        if best_bid is not None and best_bid > 0.01:
+            sell_price = round(max(best_bid - 0.01, 0.01), 2)
+        else:
+            sell_price = 0.01
+
+        order_response = self._post_order(token_id, sell_price, total_shares, "SELL", order_type="GTC")
+        if order_response is None:
+            print(f"[live] GTC sell failed for {trade['market_name'][:50]} — will retry next cycle")
+            return
+
+        order_id = order_response.get("orderID", "")
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        parent_trade = next((l for l in legs if l["id"] == parent_id), legs[0])
+        db.update_trade(parent_trade["id"], {
+            "exit_order_id":        order_id,
+            "exit_order_price":     sell_price,
+            "exit_order_placed_at": now_iso,
+        })
+
+        for leg in legs:
+            db.update_trade(leg["id"], {
+                "status":      "exit_pending",
+                "exit_reason": _append_reason(leg.get("exit_reason"), reason),
+            })
+
+        print(f"[live] EXIT INITIATED {trade['market_name'][:55]}")
+        print(f"             GTC sell: {total_shares:.2f} shares @ ${sell_price:.2f}  "
+              f"order={order_id[:12]}  reason={reason}")
+
     # ── Resolution settlement ────────────────────────────────────────────────
 
     def settle_resolved(self, trade: dict, resolved_yes: bool):
