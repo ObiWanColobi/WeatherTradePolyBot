@@ -219,6 +219,10 @@ def init_db():
         _safe_add_column(conn, "trades", "claim_tx_hash",      "TEXT")              # Polygon tx hash
         _safe_add_column(conn, "trades", "claim_retries",      "INTEGER DEFAULT 0") # retry count
         _safe_add_column(conn, "trades", "claim_last_attempt", "TEXT")              # ISO timestamp of last attempt
+        # Resilient exit execution (2026-04-15) — GTC order tracking
+        _safe_add_column(conn, "trades", "exit_order_id",        "TEXT")
+        _safe_add_column(conn, "trades", "exit_order_price",     "REAL")
+        _safe_add_column(conn, "trades", "exit_order_placed_at", "TEXT")
 
         # Backfill hours_to_close for trades that predate this column
         conn.executescript("""
@@ -348,6 +352,16 @@ def get_open_trades() -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def get_exit_pending_trades() -> list[dict]:
+    """Return parent trades that have a pending GTC exit order on the CLOB."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM trades WHERE status = 'exit_pending' "
+            "AND exit_order_id IS NOT NULL ORDER BY opened_at ASC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def get_all_trades() -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
@@ -472,7 +486,8 @@ def get_position_legs(parent_id: int) -> list[dict]:
     """Return all legs of an extended position (parent + children), ordered by leg_number."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM trades WHERE (id = ? OR parent_trade_id = ?) AND status = 'open' "
+            "SELECT * FROM trades WHERE (id = ? OR parent_trade_id = ?) "
+            "AND status IN ('open', 'exit_pending') "
             "ORDER BY leg_number",
             (parent_id, parent_id),
         ).fetchall()
