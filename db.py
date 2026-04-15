@@ -236,6 +236,25 @@ def init_db():
                AND status = 'closed';
         """)
 
+        # At most one active (open or claim_pending) trade per on-chain
+        # token_id. Prevents reconciliation from re-importing positions that
+        # are still held pending an on-chain redeem. Closed trades are
+        # excluded so the same market can legitimately be re-entered later.
+        try:
+            conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_active_token
+                    ON trades(token_id)
+                    WHERE token_id IS NOT NULL
+                      AND status IN ('open', 'claim_pending')
+                      AND parent_trade_id IS NULL
+            """)
+        except sqlite3.IntegrityError as e:
+            # Existing duplicates block index creation. Surface loudly so the
+            # operator cleans the DB instead of silently losing the guardrail.
+            print(f"[db] WARNING: cannot create idx_trade_active_token — {e}")
+            print("[db]          duplicate active token_id rows exist. "
+                  "Clean the DB and restart to enable the guardrail.")
+
 
 def _safe_add_column(conn: sqlite3.Connection, table: str, column: str, col_type: str):
     try:
@@ -332,6 +351,14 @@ def get_all_trades() -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT * FROM trades ORDER BY opened_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_closed_trades() -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM trades WHERE status = 'closed' ORDER BY closed_at DESC"
         ).fetchall()
         return [dict(r) for r in rows]
 

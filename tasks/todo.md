@@ -5,6 +5,82 @@ start-of-session roadmap plus ongoing gaps.
 
 ---
 
+## 2026-04-14 — Closed-position tracking + claim-error fix (IN PROGRESS)
+
+### Problem
+Cloud bot (Kamatera, `weatherbot.service`) had 2 expired trades that vanished
+from "Open Positions" and never appeared in "Trade History". Log showed:
+1. `AttributeError: module 'db' has no attribute 'get_closed_trades'` at UTC
+   midnight daily digest — crashed the bot.
+2. Repeated `redeemPositions` reverts: "result for condition not received yet".
+3. Duplicate DB rows (#9, #10) cloning #2 (HK) and #5 (Denver) after restart.
+
+### Root causes
+1. **Missing `db.get_closed_trades()`** — referenced by `_send_daily_digest`,
+   never implemented.
+2. **`reconcile_positions` ignored `claim_pending`** — only queried
+   `get_open_trades()` when building `tracked_token_ids`. After the crash
+   restart, on-chain HK/Denver positions matched no open DB row and were
+   reimported as "orphaned" duplicates.
+3. **Claim ran ahead of UMA oracle** — resolver uses CLOB midpoint (spot) to
+   detect resolution, but `redeemPositions` needs `payoutDenominator > 0`. We
+   fired claims before the oracle posted and burned retry slots on reverts.
+
+### Phase A — Stop the crash + resume orphans correctly
+- [x] Add `db.get_closed_trades()` → [db.py](../db.py)
+- [x] `reconcile_positions` includes `get_pending_claims()` in
+      `tracked_token_ids` → [executor/live.py](../executor/live.py)
+- [x] Reconcile only calls `_close_stale_position` for `open_db_trades`
+      (claim_pending trades are waiting on oracle, not stale)
+
+### Phase C item 5 — Pre-claim oracle check
+- [x] Add `payoutDenominator(bytes32)` to CTF ABI →
+      [chain/abi/conditional_tokens.json](../chain/abi/conditional_tokens.json)
+- [x] Add `Claimer.is_condition_resolved()` →
+      [chain/claimer.py](../chain/claimer.py)
+- [x] `process_pending_claims` calls `is_condition_resolved()` before
+      `claim_winnings()`; `False` → defer silently, `None` (RPC error) → skip
+      without burning a retry slot → [executor/live.py](../executor/live.py)
+
+### Phase C item 6 Option A — Dashboard visibility
+- [x] `weather_dashboard.py` trade history includes `claim_pending` rows →
+      [ui/weather_dashboard.py](../ui/weather_dashboard.py)
+- [x] Exit Reason column shows "(claim pending)" suffix until tx confirms
+- [x] Existing claim-confirmation path at `executor/live.py` already flips row
+      to `status='closed'` + credits balance when tx mines — no extra work
+
+### Defense in depth
+- [x] Partial unique index on `token_id` for `status IN ('open','claim_pending')`
+      → [db.py](../db.py) `init_db()`. Creation wrapped in
+      `try/except IntegrityError` so init doesn't crash on pre-existing dupes;
+      logs a clear warning instead.
+- [x] Startup duplicate-token detection (`_find_duplicate_active_tokens`) in
+      `reconcile_positions`. If duplicates are found, reconcile aborts and
+      fires a **critical** notification rather than silently continuing.
+
+### DB cleanup (waiting on user)
+- [ ] Receive fresh DB copy from user
+- [ ] `DELETE FROM trades WHERE id IN (9, 10);` (confirmed dupes of #2, #5)
+- [ ] `UPDATE trades SET claim_retries = 0, claim_last_attempt = NULL,
+      claim_next_retry = NULL WHERE id IN (2, 5);`
+- [ ] Run `python -c "import db; db.init_db()"` to verify partial unique
+      index creates cleanly (no IntegrityError warning)
+- [ ] Sanity check: no duplicate `token_id` in `status IN ('open','claim_pending')`
+
+### Deploy
+- [ ] User uploads cleaned DB to Kamatera `/opt/tradebot0/weather_bot.db`
+- [ ] User deploys updated files: `db.py`, `executor/live.py`,
+      `chain/claimer.py`, `chain/abi/conditional_tokens.json`,
+      `ui/weather_dashboard.py`
+- [ ] `systemctl restart weatherbot.service`
+- [ ] Tail log: expect reconcile to find 2 claim_pending positions, oracle
+      check either defers them or claims them, no duplicate warnings.
+
+### Review
+(to be filled in after verification)
+
+---
+
 ## Stage 2 — Trader Shadow Forecast DB
 
 Build a dataset of implied forecasts (from trader positions) vs actuals vs our model forecasts,

@@ -122,7 +122,14 @@ cash          = db.get_balance() or PAPER_STARTING_BALANCE
 all_trades    = db.get_all_trades()
 open_trades   = [t for t in all_trades if t["status"] == "open"]
 HISTORY_CUTOFF = "2026-04-02T20:52"
-closed_trades = [t for t in all_trades if t["status"] == "closed" and (t.get("opened_at") or "") > HISTORY_CUTOFF]
+# Include claim_pending rows (resolved, awaiting on-chain redemption) in the
+# history view so they're visible while the claim completes. Once the claim
+# confirms they transition to status='closed' and continue to render here.
+closed_trades = [
+    t for t in all_trades
+    if t["status"] in ("closed", "claim_pending")
+    and (t.get("opened_at") or "") > HISTORY_CUTOFF
+]
 stats         = db.get_stats()
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -816,7 +823,11 @@ if closed_trades:
             "Hrs @ Entry":  _fmt_hours(t.get("hours_to_close_at_entry")),
             "Hrs @ Exit":   _fmt_hours(t.get("hours_to_close_at_exit")),
             "Vol 24h":      round(t["volume_24h"]) if t.get("volume_24h") else None,
-            "Exit Reason":  (t.get("exit_reason") or "resolved")[:40],
+            "Exit Reason":  (
+                f"{(t.get('exit_reason') or 'resolved')[:28]} (claim pending)"
+                if t["status"] == "claim_pending"
+                else (t.get("exit_reason") or "resolved")[:40]
+            ),
             "Market":       url or t.get("market_name", ""),
             "Opened":       (t.get("opened_at") or "")[:16],
             "Closed":       (t.get("closed_at") or "")[:16],

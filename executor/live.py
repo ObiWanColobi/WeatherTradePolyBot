@@ -375,22 +375,57 @@ class LiveExecutor(BaseExecutor):
             if tid and p.get("size", 0) > 0.01:
                 exchange_by_token[tid] = p
 
-        db_trades = db.get_open_trades()
-        db_token_ids = {t.get("token_id", "") for t in db_trades}
+        # Include claim_pending trades when matching — they still hold the
+        # on-chain position until the redeemPositions() tx confirms, so they
+        # must NOT be treated as orphaned or stale.
+        open_db_trades    = db.get_open_trades()
+        pending_db_trades = db.get_pending_claims()
+        tracked_token_ids = {
+            t.get("token_id", "")
+            for t in (*open_db_trades, *pending_db_trades)
+            if t.get("token_id")
+        }
 
-        # Check for orphaned exchange positions (not in DB)
-        orphaned = []
-        for tid, pos in exchange_by_token.items():
-            if tid not in db_token_ids:
-                orphaned.append(pos)
+        # Detect any lingering duplicate token_ids across active rows before
+        # we touch the exchange. If this fires, the partial unique index in
+        # init_db() should have already blocked the dup — getting here means
+        # something wrote around the index or the DB predates it.
+        dup_tokens = _find_duplicate_active_tokens(
+            (*open_db_trades, *pending_db_trades)
+        )
+        if dup_tokens:
+            print(
+                f"[live] WARNING: {len(dup_tokens)} duplicate token_id(s) across "
+                f"active trades — not importing or closing anything until resolved:"
+            )
+            for tok, ids in dup_tokens.items():
+                print(f"         token={tok[:20]}… ids={ids}")
+            notify(
+                "critical",
+                "Duplicate active trades detected",
+                "Bot found multiple open/claim_pending rows sharing a token_id. "
+                "Reconciliation is halted to avoid double-counting. Clean the DB "
+                "(keep the lowest id per token) and restart.",
+                fields={"Duplicate tokens": str(len(dup_tokens))},
+            )
+            return
+
+        # Check for orphaned exchange positions (not tracked by any active row)
+        orphaned = [
+            pos for tid, pos in exchange_by_token.items()
+            if tid not in tracked_token_ids
+        ]
 
         if orphaned:
             print(f"[live] Found {len(orphaned)} position(s) on exchange not in DB — importing:")
             for pos in orphaned:
                 self._import_orphaned_position(pos)
 
-        # Auto-close stale DB positions (in DB but gone from exchange)
-        for t in db_trades:
+        # Auto-close stale DB positions (in DB but gone from exchange).
+        # Only consider status='open' — claim_pending rows are expected to
+        # disappear from the exchange when the redeem tx confirms, and the
+        # claim flow handles their status transition itself.
+        for t in open_db_trades:
             tid = t.get("token_id", "")
             if tid and tid not in exchange_by_token:
                 self._close_stale_position(t)
@@ -1118,6 +1153,23 @@ class LiveExecutor(BaseExecutor):
             index_sets = [1] if direction == "YES" else [2]
 
             market_id = trade.get("market_id", "")
+
+            # Gate on on-chain oracle readiness. The resolver uses CLOB
+            # midpoint (Polymarket orderbook) to detect settlement, but the
+            # UMA oracle reports payouts to the CTF contract on its own
+            # schedule. Skipping silently here prevents retry-slot burn and
+            # eliminates the "result for condition not received yet" spam.
+            ready = self._claimer.is_condition_resolved(market_id)
+            if ready is False:
+                print(f"[claims] Oracle not yet posted for trade #{trade['id']}  "
+                      f"{trade['market_name'][:40]}… — deferring")
+                continue
+            if ready is None:
+                # Transient RPC failure — do not burn a retry, try next cycle
+                print(f"[claims] Oracle check failed for trade #{trade['id']} "
+                      f"(RPC error) — will retry next cycle")
+                continue
+
             print(f"[claims] Attempting claim for trade #{trade['id']}  "
                   f"{trade['market_name'][:40]}...")
 
@@ -1267,6 +1319,23 @@ class LiveExecutor(BaseExecutor):
 
 
 # ── Module-level helpers ─────────────────────────────────────────────────────
+
+def _find_duplicate_active_tokens(trades) -> dict[str, list[int]]:
+    """Return {token_id: [trade_id, ...]} for token_ids held by >1 active parent row.
+
+    Extended-position child legs (parent_trade_id set) legitimately share a
+    token_id with their parent, so they are excluded from duplicate detection.
+    """
+    seen: dict[str, list[int]] = {}
+    for t in trades:
+        if t.get("parent_trade_id"):
+            continue
+        tid = t.get("token_id") or ""
+        if not tid:
+            continue
+        seen.setdefault(tid, []).append(t["id"])
+    return {tok: ids for tok, ids in seen.items() if len(ids) > 1}
+
 
 def _hours_until(end_date_str: str | None) -> float | None:
     """Hours from now until end_date_str. Returns None if unparseable or missing."""
