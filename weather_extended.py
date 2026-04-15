@@ -145,10 +145,11 @@ def check_extended_position(trade: dict, current_scan: dict | None) -> dict | No
     # 5. Kelly sizing
     # Re-derive unanimity from current ensemble — a normal-entry parent can reach
     # unanimous conviction by leg time, and vice versa. Don't inherit from parent.
-    balance      = db.get_balance()
-    model_prob   = current_scan.get("model_prob") or 0
-    market_price = current_scan.get("market_price") or 0.5
-    days_to_res  = current_scan.get("days_to_resolution") or 0
+    balance        = db.get_balance()
+    model_prob     = current_scan.get("model_prob") or 0
+    market_price   = current_scan.get("market_price") or 0.5
+    days_to_res    = current_scan.get("days_to_resolution") or 0
+    ens_margin_c   = current_scan.get("ensemble_margin_c")
     cur_conviction = max(cur_ratio, 1.0 - cur_ratio)
     is_unanimous   = cur_conviction >= _UNANIMOUS_MIN_CONVICTION
 
@@ -160,6 +161,7 @@ def check_extended_position(trade: dict, current_scan: dict | None) -> dict | No
         ensemble_n=cur_ens_n,
         days_to_resolution=days_to_res,
         unanimous=is_unanimous,
+        ensemble_margin_c=ens_margin_c,
     )
     if size <= 0:
         return _reject(trade, f"kelly size zero (mdl={model_prob:.2f} mkt={market_price:.2f})")
