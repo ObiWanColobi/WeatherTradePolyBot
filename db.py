@@ -303,11 +303,12 @@ def record_account_value():
         cash = float(cash["amount"]) if cash else 0.0
 
         open_trades = conn.execute(
-            "SELECT current_price, fill_price, shares FROM trades WHERE status IN ('open', 'claim_pending')"
+            "SELECT current_price, fill_price, shares, status FROM trades WHERE status IN ('open', 'claim_pending')"
         ).fetchall()
 
         position_value = sum(
-            (t["current_price"] or t["fill_price"]) * t["shares"]
+            t["shares"] if t["status"] == "claim_pending"
+            else (t["current_price"] or t["fill_price"]) * t["shares"]
             for t in open_trades
         )
 

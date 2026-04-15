@@ -256,9 +256,11 @@ with st.sidebar:
                 st.session_state.confirm_reset = False
                 st.rerun()
 
+pending_trades = [t for t in all_trades if t["status"] == "claim_pending"]
 unrealized    = sum(_unreal_pnl(t) for t in open_trades)
 position_val  = sum((t.get("current_price") or t["fill_price"]) * t["shares"] for t in open_trades)
-account_value = cash + position_val
+pending_val   = sum(t["shares"] for t in pending_trades)
+account_value = cash + position_val + pending_val
 # In live mode, use the earliest recorded balance as baseline instead of paper starting balance
 if TRADING_MODE == "live":
     _history = db.get_balance_history()
