@@ -37,11 +37,17 @@ _TOP_CITIES              = set(WEATHER.get("top_cities",                []))
 _MAX_SPREAD_CENTS        = WEATHER.get("entry_max_spread_cents",        0.10)
 _MIN_HOURS_TO_CLOSE      = WEATHER.get("entry_min_hours_to_close",      2.0)
 _MIN_FILL_PRICE          = WEATHER.get("entry_min_fill_price",          0.15)
-_MIN_FILL_PRICE_YES      = WEATHER.get("entry_min_fill_price_yes",      0.25)
+# _MIN_FILL_PRICE_YES removed 2026-04-15 — YES trades disabled at decision layer.
+# Config key still present in config.py for reference but no longer read.
 _MIN_ENSEMBLE_MARGIN_C       = WEATHER.get("entry_min_ensemble_margin_c",       2.0)
 _MIN_ENSEMBLE_MARGIN_FLOOR   = WEATHER.get("entry_min_ensemble_margin_c_floor", 1.5)
 _UNANIMOUS_MIN_CONVICTION    = WEATHER.get("entry_unanimous_min_conviction",    0.97)
 _UNANIMOUS_MIN_EDGE_PCT      = WEATHER.get("entry_unanimous_min_edge_pct",      0.07)
+# Per-city strict overrides (2026-04-15) — cities with weak forecast reliability
+_CITY_ADJUSTMENT_ENABLED     = WEATHER.get("entry_city_adjustment_enabled",     True)
+_CITY_STRICT_CITIES          = {c.lower() for c in WEATHER.get("entry_city_strict_cities", [])}
+_CITY_STRICT_MIN_CONVICTION  = WEATHER.get("entry_city_strict_min_conviction",  0.95)
+_CITY_STRICT_MIN_MARGIN_C    = WEATHER.get("entry_city_strict_min_margin_c",    4.0)
 
 
 @dataclass
@@ -80,14 +86,29 @@ def check_entry(market: dict, scan_data: dict, direction: str | None = None) -> 
 
     ens_pct    = ens_yes / ens_n
     conviction = max(ens_pct, 1 - ens_pct)
+
+    # Per-city strict override: weak-reliability cities require higher conviction
+    # and a wider ensemble margin. Applied before the standard checks so the
+    # stricter bar is the effective floor for these cities.
+    city_lower        = (scan_data.get("city", "") or "").lower()
+    city_is_strict    = _CITY_ADJUSTMENT_ENABLED and city_lower in _CITY_STRICT_CITIES
+    min_conviction    = _CITY_STRICT_MIN_CONVICTION if city_is_strict else _MIN_ENSEMBLE_CONVICTION
+    min_margin_ceiling = _CITY_STRICT_MIN_MARGIN_C if city_is_strict else _MIN_ENSEMBLE_MARGIN_C
+
     checks["ensemble"] = {
-        "ok":    conviction >= _MIN_ENSEMBLE_CONVICTION,
+        "ok":    conviction >= min_conviction,
         "value": f"{ens_pct:.0%} {ens_yes}/{ens_n}",
-        "need":  f">={_MIN_ENSEMBLE_CONVICTION:.0%} or <={1-_MIN_ENSEMBLE_CONVICTION:.0%}",
+        "need":  f">={min_conviction:.0%} or <={1-min_conviction:.0%}"
+                 + (f" [strict city {city_lower}]" if city_is_strict else ""),
     }
 
     if not checks["ensemble"]["ok"]:
-        return EntryDecision(ok=False, reason="ensemble conviction too low", checks=checks)
+        reason = (
+            f"ensemble conviction too low for strict city {city_lower} (need >={min_conviction:.0%})"
+            if city_is_strict
+            else "ensemble conviction too low"
+        )
+        return EntryDecision(ok=False, reason=reason, checks=checks)
 
     # ── 1b. Ensemble margin (coin-flip filter) ────────────────────────────────
     # If the ensemble median is too close to the threshold, small measurement
@@ -97,9 +118,11 @@ def check_entry(market: dict, scan_data: dict, direction: str | None = None) -> 
     # the full ceiling (3.0°C). This lets genuinely lopsided ensembles through
     # without relaxing the guard for ambiguous ones.
     ens_margin = scan_data.get("ensemble_margin_c")
-    if ens_margin is not None and _MIN_ENSEMBLE_MARGIN_C > 0:
-        scale = (conviction - 1.0) / (_MIN_ENSEMBLE_CONVICTION - 1.0)   # 0 at unanimous → 1 at min conviction
-        required_margin = _MIN_ENSEMBLE_MARGIN_FLOOR + (_MIN_ENSEMBLE_MARGIN_C - _MIN_ENSEMBLE_MARGIN_FLOOR) * scale
+    if ens_margin is not None and min_margin_ceiling > 0:
+        # Scale from unanimous (conviction=1.0, margin=floor) to the effective
+        # min_conviction for this city (margin=min_margin_ceiling).
+        scale = (conviction - 1.0) / (min_conviction - 1.0) if min_conviction < 1.0 else 0.0
+        required_margin = _MIN_ENSEMBLE_MARGIN_FLOOR + (min_margin_ceiling - _MIN_ENSEMBLE_MARGIN_FLOOR) * scale
         checks["ensemble_margin"] = {
             "ok":    abs(ens_margin) >= required_margin,
             "value": f"{ens_margin:+.1f}°C",
@@ -179,9 +202,11 @@ def check_entry(market: dict, scan_data: dict, direction: str | None = None) -> 
     # Skipped when direction is unknown (backward-compatible with callers that
     # don't pass direction, e.g. dry-run tooling).
     if direction is not None:
+        # YES trades disabled at decision layer (2026-04-15) — only NO path remains.
+        # The backward-compatible YES handling was removed along with _MIN_FILL_PRICE_YES.
         yes_price   = market.get("price", 0.5)
-        fill_price  = yes_price if direction.lower() == "yes" else (1.0 - yes_price)
-        floor       = _MIN_FILL_PRICE_YES if direction.lower() == "yes" else _MIN_FILL_PRICE
+        fill_price  = 1.0 - yes_price if direction.lower() == "no" else yes_price
+        floor       = _MIN_FILL_PRICE
         checks["min_fill_price"] = {
             "ok":    fill_price >= floor,
             "value": f"${fill_price:.3f}",
