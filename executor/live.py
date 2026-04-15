@@ -118,7 +118,7 @@ class LiveExecutor(BaseExecutor):
         self._last_clob_call_ts = time.time()
 
     def _post_order(self, token_id: str, price: float, size: float,
-                    side: str) -> dict | None:
+                    side: str, order_type: str = "FOK") -> dict | None:
         """
         Sign and post an order to the CLOB. Returns response dict or None.
 
@@ -171,13 +171,14 @@ class LiveExecutor(BaseExecutor):
             def _do_post():
                 try:
                     signed = self._client.create_order(order_args)
-                    response = self._client.post_order(signed, OrderType.FOK)
-                    print(f"[live] Order posted: {response.get('orderID', '?')[:12]}  "
+                    ot = OrderType.GTC if order_type == "GTC" else OrderType.FOK
+                    response = self._client.post_order(signed, ot)
+                    print(f"[live] Order posted ({order_type}): {response.get('orderID', '?')[:12]}  "
                           f"status={response.get('status', '?')}")
                     return response
                 except Exception as e:
                     if "fully filled" in str(e).lower():
-                        print(f"[live] FOK rejected — insufficient liquidity")
+                        print(f"[live] {order_type} rejected — insufficient liquidity")
                         return _FOK_REJECTED
                     raise
 
