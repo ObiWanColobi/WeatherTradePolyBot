@@ -69,6 +69,7 @@ def run_exit_pass():
         return
 
     _executor.update_open_positions()
+    db.record_account_value()
 
     # Re-fetch after update so the exit loop sees the freshly-written prices,
     # not the stale values from before update_open_positions() ran.
