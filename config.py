@@ -87,6 +87,18 @@ WEATHER = {
     "entry_unanimous_min_conviction":  0.97,   # ≥97% of ensemble members (~67/69)
     "entry_unanimous_min_edge_pct":    0.07,   # relaxed floor when unanimous (vs 12% normal)
 
+    # ── Per-city strict overrides (2026-04-15) ────────────────────────────────
+    # Cities with weak ensemble reliability or frequent coastal temp swings
+    # require near-unanimous conviction and a wider margin than the default.
+    # Research TODO: build a data-driven reliability score after 100+ resolved trades.
+    "entry_city_adjustment_enabled": True,
+    "entry_city_strict_cities": [
+        "chicago", "dallas", "atlanta", "toronto",   # US inland — weak ensemble reliability
+        "london", "wellington",                       # coastal — temp swings
+    ],
+    "entry_city_strict_min_conviction": 0.95,  # require near-unanimous for these cities (vs 0.85 default)
+    "entry_city_strict_min_margin_c":   4.0,   # require wider margin for these cities (vs 3.0 default)
+
     # ╔═══════════════════════════════════════════════════════════════════════════╗
     # ║  EXIT CONDITIONS                                                        ║
     # ║  When to close an open position before market resolution                ║
