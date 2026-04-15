@@ -155,6 +155,19 @@ def get_orderbook(token_id: str) -> dict:
         return {"bids": [], "asks": []}
 
 
+def get_best_bid(token_id: str) -> float | None:
+    """Return the highest bid price on the order book, or None if no bids."""
+    book = get_orderbook(token_id)
+    bids = book.get("bids", [])
+    if not bids:
+        return None
+    try:
+        prices = [float(b["price"]) for b in bids if b.get("price")]
+        return max(prices) if prices else None
+    except (ValueError, KeyError):
+        return None
+
+
 def get_midpoint(token_id: str) -> float | None:
     for delay in (0, 3, 8):
         try:
