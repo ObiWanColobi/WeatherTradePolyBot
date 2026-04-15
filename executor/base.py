@@ -25,6 +25,14 @@ class BaseExecutor(ABC):
         """Close all legs of an extended position (or a single trade)."""
 
     @abstractmethod
+    def initiate_exit(self, trade: dict, reason: str):
+        """Post a GTC sell order to begin exiting a position across bot cycles."""
+
+    @abstractmethod
+    def manage_pending_exit(self, trade: dict):
+        """Check fill status of a pending GTC exit order, reprice if needed, settle if filled."""
+
+    @abstractmethod
     def settle_resolved(self, trade: dict, resolved_yes: bool):
         """Settle a trade at market resolution."""
 
