@@ -65,6 +65,10 @@ def check_extended_position(trade: dict, current_scan: dict | None) -> dict | No
     parent_id = trade["id"]
     direction = trade["direction"].upper()
 
+    # 0. YES positions disabled (2026-04-15) — skip any legacy open YES position
+    if direction == "YES":
+        return _reject(trade, "YES trades disabled (algorithm tuning 2026-04-15)")
+
     # 0. Rejected-attempt cooldown (in-memory, survives only current session)
     last_attempt = _rejected_attempts.get(parent_id)
     if last_attempt is not None:
