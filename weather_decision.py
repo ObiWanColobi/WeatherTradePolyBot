@@ -98,6 +98,18 @@ def evaluate(
         mkt_price = candidate["market_price"]
         mdl_prob  = candidate["model_prob"]
         direction = "yes" if mdl_prob > mkt_price else "no"
+
+        # ── 0a. YES trades disabled (2026-04-15 — trade review) ──────────────
+        if direction == "yes":
+            rejected.append(DecisionResult(
+                candidate=candidate,
+                verdict="REJECTED",
+                reason="YES trades disabled (algorithm tuning 2026-04-15)",
+                direction=direction,
+                checks={},
+            ))
+            continue
+
         days      = candidate.get("days_to_resolution", 0)
         ens_n     = candidate.get("ens_n", 0)
         ens_pct   = candidate.get("ens_pct")
