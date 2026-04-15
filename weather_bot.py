@@ -65,6 +65,17 @@ def _prompt_max_bet() -> float:
 # -- Exit pass ----------------------------------------------------------------
 
 def run_exit_pass():
+    # ── Phase 1: Manage pending GTC exit orders ──────────────────────────────
+    pending_exits = db.get_exit_pending_trades()
+    exit_pending_parents = set()
+    for ptrade in pending_exits:
+        parent_id = ptrade.get("parent_trade_id") or ptrade["id"]
+        if parent_id in exit_pending_parents:
+            continue
+        exit_pending_parents.add(parent_id)
+        _executor.manage_pending_exit(ptrade)
+
+    # ── Phase 2: Evaluate new exit signals ───────────────────────────────────
     if not db.get_open_trades():
         return
 
@@ -78,6 +89,10 @@ def run_exit_pass():
 
     for trade in open_trades:
         if trade["id"] in closed_this_pass:
+            continue
+        # Skip trades already being exited via GTC
+        parent_id = trade.get("parent_trade_id") or trade["id"]
+        if parent_id in exit_pending_parents:
             continue
         # Reconstruct the minimal market dict from stored trade fields.
         # The Gamma API has no reliable single-market lookup endpoint —
@@ -141,7 +156,7 @@ def run_exit_pass():
                 f"  [exit] {_pos_line}  -- {sig.reason}{leg_suffix}"
                 + (" [URGENT]" if sig.urgent else "")
             )
-            _executor.close_position(trade, reason=sig.reason)
+            _executor.initiate_exit(trade, reason=sig.reason)
             for leg in legs:
                 closed_this_pass.add(leg["id"])
         else:
