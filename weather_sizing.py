@@ -51,6 +51,7 @@ def kelly_size(
     ensemble_n:         int = 0,
     days_to_resolution: int = 0,
     unanimous:          bool = False,
+    ensemble_margin_c:  float | None = None,
 ) -> float:
     """
     Calculate position size in USDC using fractional Kelly, clamped.
@@ -93,6 +94,13 @@ def kelly_size(
     horizon_mult = _HORIZON_DISCOUNTS.get(days_to_resolution, _HORIZON_DISCOUNT_DEFAULT)
     kelly *= horizon_mult
 
+    # Ensemble margin scaling (2026-04-15) — bet size proportional to forecast
+    # distance from threshold. 0°C → 0.0x, 5°C+ → 1.0x. Small margin = coin-flip
+    # risk = smaller bet. Large margin = high conviction = full Kelly.
+    if ensemble_margin_c is not None:
+        margin_mult = min(abs(ensemble_margin_c) / 5.0, 1.0)
+        kelly *= margin_mult
+
     # Apply fractional Kelly and balance cap
     fraction = kelly * _KELLY_FRACTION
     size     = fraction * balance
@@ -120,6 +128,7 @@ def size_summary(
     ensemble_n:         int = 0,
     days_to_resolution: int = 0,
     unanimous:          bool = False,
+    ensemble_margin_c:  float | None = None,
 ) -> dict:
     """
     Return a dict of sizing diagnostics for logging/display.
@@ -138,7 +147,7 @@ def size_summary(
     kelly = (edge / odds) if odds > 0 and edge > 0 else 0.0
     horizon_mult = _HORIZON_DISCOUNTS.get(days_to_resolution, _HORIZON_DISCOUNT_DEFAULT)
 
-    size = kelly_size(balance, model_prob, market_price, direction, ensemble_n, days_to_resolution, unanimous)
+    size = kelly_size(balance, model_prob, market_price, direction, ensemble_n, days_to_resolution, unanimous, ensemble_margin_c)
 
     return {
         "direction":       direction,
