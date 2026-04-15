@@ -21,6 +21,8 @@ tasks/
 
 # ── Runtime state ────────────────────────────────────────────────────────────
 discovery_last_run.txt
+heartbeat.json
+data/dismissed_alerts.txt
 
 # ── Logs ─────────────────────────────────────────────────────────────────────
 cloudbotlogs/
