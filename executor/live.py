@@ -1061,6 +1061,208 @@ class LiveExecutor(BaseExecutor):
         print(f"             GTC sell: {total_shares:.2f} shares @ ${sell_price:.2f}  "
               f"order={order_id[:12]}  reason={reason}")
 
+    def _settle_exit(self, parent_trade: dict, legs: list[dict],
+                     fill_price: float, filled_shares: float, fee: float):
+        """Settle a filled GTC exit order across all legs proportionally."""
+        total_shares = sum(leg.get("shares", 0) for leg in legs)
+        if total_shares <= 0:
+            return
+
+        total_proceeds = filled_shares * fill_price
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        for leg in legs:
+            leg_share_frac = leg.get("shares", 0) / total_shares
+            leg_proceeds = total_proceeds * leg_share_frac
+            leg_fee = fee * leg_share_frac
+            leg_cost = leg["size_usdc"]
+            leg_pnl = leg_proceeds - leg_cost - leg_fee
+            leg_pnl_pct = (leg_pnl / leg_cost * 100) if leg_cost > 0 else 0.0
+
+            db.update_trade(leg["id"], {
+                "exit_price":             fill_price,
+                "closed_at":              now_iso,
+                "status":                 "closed",
+                "pnl":                    leg_pnl,
+                "pnl_pct":                leg_pnl_pct,
+                "hours_to_close_at_exit": _hours_until(leg.get("end_date")),
+                "fee_usdc":               (leg.get("fee_usdc") or 0) + leg_fee,
+                "exit_order_id":          None,
+                "exit_order_price":       None,
+                "exit_order_placed_at":   None,
+            })
+
+        db.update_balance(total_proceeds)
+        db.record_account_value()
+
+        reason = parent_trade.get("exit_reason", "exit")
+        name = parent_trade.get("market_name", "unknown")[:55]
+        total_cost = sum(leg["size_usdc"] for leg in legs)
+        total_pnl = total_proceeds - total_cost - fee
+
+        print(f"[live] EXIT FILLED {name}")
+        print(f"             {filled_shares:.2f} shares @ ${fill_price:.3f}  "
+              f"P&L: ${total_pnl:+.2f}  Fee: ${fee:.2f}")
+
+        notify("info", "Position Closed",
+               f"Exited {name} — {reason}",
+               fields={"P&L": f"${total_pnl:+.2f}",
+                        "Reason": reason},
+               color=COLOR_GREEN)
+
+    def manage_pending_exit(self, trade: dict):
+        """Check fill status of a pending GTC exit, reprice if needed, settle if filled."""
+        order_id = trade.get("exit_order_id")
+        token_id = trade.get("token_id")
+        parent_id = trade.get("parent_trade_id") or trade["id"]
+
+        if not order_id or not token_id:
+            return
+
+        legs = db.get_position_legs(parent_id)
+        if not legs:
+            legs = [trade]
+
+        # Check order status on CLOB
+        try:
+            self._throttle_clob()
+            order = self._client.get_order(order_id)
+        except Exception as e:
+            print(f"[live] Exit order check failed for {order_id[:12]}: {e}")
+            return
+
+        if order is None:
+            print(f"[live] Exit order {order_id[:12]} not found — will retry next cycle")
+            return
+
+        status = (order.get("status") or "").lower()
+
+        # ── Filled ────────────────────────────────────────────────────────────
+        if status in ("matched", "filled"):
+            trades = order.get("associate_trades") or []
+            if trades and isinstance(trades[0], dict):
+                total_cost = 0.0
+                total_shares = 0.0
+                total_fee = 0.0
+                for t in trades:
+                    p = float(t.get("price", 0))
+                    s = float(t.get("size", 0))
+                    f = float(t.get("fee", 0))
+                    total_cost += p * s
+                    total_shares += s
+                    total_fee += f
+                fill_price = total_cost / total_shares if total_shares > 0 else trade.get("exit_order_price", 0)
+            else:
+                matched = float(order.get("size_matched", 0))
+                fill_price = float(order.get("price", trade.get("exit_order_price", 0)))
+                total_shares = matched
+                total_fee = 0.0
+
+            if total_shares > 0:
+                self._settle_exit(trade, legs, fill_price, total_shares, total_fee)
+                return
+
+        # ── Cancelled/expired ─────────────────────────────────────────────────
+        if status in ("cancelled", "expired", "dead", "canceled"):
+            result = self._lookup_sell_fills(token_id, trade)
+            if result and result[0] is not None and result[1] is not None and result[1] > 0:
+                self._settle_exit(trade, legs, result[0], result[1], result[2])
+                return
+            print(f"[live] Exit order {order_id[:12]} was cancelled — reverting to open")
+            for leg in legs:
+                db.update_trade(leg["id"], {"status": "open"})
+            db.update_trade(trade["id"], {
+                "exit_order_id": None,
+                "exit_order_price": None,
+                "exit_order_placed_at": None,
+            })
+            return
+
+        # ── Partial fill ──────────────────────────────────────────────────────
+        size_matched = float(order.get("size_matched", 0))
+        orig_size = float(order.get("original_size", 0) or order.get("size", 0) or 0)
+        if size_matched > 0 and orig_size > 0 and size_matched < orig_size * 0.99:
+            trades_data = order.get("associate_trades") or []
+            if trades_data and isinstance(trades_data[0], dict):
+                tc = sum(float(t.get("price", 0)) * float(t.get("size", 0)) for t in trades_data)
+                ts = sum(float(t.get("size", 0)) for t in trades_data)
+                tf = sum(float(t.get("fee", 0)) for t in trades_data)
+                fp = tc / ts if ts > 0 else trade.get("exit_order_price", 0)
+            else:
+                fp = float(order.get("price", trade.get("exit_order_price", 0)))
+                ts = size_matched
+                tf = 0.0
+
+            total_leg_shares = sum(leg.get("shares", 0) for leg in legs)
+            if total_leg_shares > 0 and ts > 0:
+                fill_frac = ts / total_leg_shares
+                for leg in legs:
+                    filled_leg = leg["shares"] * fill_frac
+                    remaining = leg["shares"] - filled_leg
+                    leg_proceeds = filled_leg * fp
+                    leg_fee = tf * (leg["shares"] / total_leg_shares)
+                    leg_pnl = leg_proceeds - (filled_leg * leg["fill_price"]) - leg_fee
+                    db.update_balance(leg_proceeds)
+                    db.update_trade(leg["id"], {
+                        "shares": remaining,
+                        "size_usdc": remaining * leg["fill_price"],
+                        "fee_usdc": (leg.get("fee_usdc") or 0) + leg_fee,
+                    })
+
+            self._cancel_order(order_id)
+            unfilled = orig_size - size_matched
+            best_bid = polymarket.get_best_bid(token_id)
+            reprice = round(max((best_bid or 0.01) - 0.01, 0.01), 2)
+            new_resp = self._post_order(token_id, reprice, unfilled, "SELL", order_type="GTC")
+            if new_resp:
+                db.update_trade(trade["id"], {
+                    "exit_order_id": new_resp.get("orderID", ""),
+                    "exit_order_price": reprice,
+                    "exit_order_placed_at": datetime.now(timezone.utc).isoformat(),
+                })
+            else:
+                print(f"[live] Partial repost failed — will retry next cycle")
+            return
+
+        # ── Still open / delayed — reprice if needed ──────────────────────────
+        if status in ("live", "open", "delayed", ""):
+            best_bid = polymarket.get_best_bid(token_id)
+            current_price = trade.get("exit_order_price", 0)
+            reprice_step = WEATHER.get("exit_reprice_min_step", 0.01)
+
+            if best_bid is None:
+                if current_price > 0.01:
+                    self._cancel_order(order_id)
+                    total_shares = orig_size or sum(l.get("shares", 0) for l in legs)
+                    new_resp = self._post_order(token_id, 0.01, total_shares, "SELL", order_type="GTC")
+                    if new_resp:
+                        db.update_trade(trade["id"], {
+                            "exit_order_id": new_resp.get("orderID", ""),
+                            "exit_order_price": 0.01,
+                            "exit_order_placed_at": datetime.now(timezone.utc).isoformat(),
+                        })
+                return
+
+            target_price = round(max(best_bid - 0.01, 0.01), 2)
+
+            if current_price > target_price and (current_price - target_price) >= reprice_step:
+                self._cancel_order(order_id)
+                total_shares = orig_size or sum(l.get("shares", 0) for l in legs)
+                new_resp = self._post_order(token_id, target_price, total_shares, "SELL", order_type="GTC")
+                if new_resp:
+                    db.update_trade(trade["id"], {
+                        "exit_order_id": new_resp.get("orderID", ""),
+                        "exit_order_price": target_price,
+                        "exit_order_placed_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                    print(f"[live] Exit repriced: ${current_price:.2f} -> ${target_price:.2f}  "
+                          f"best_bid=${best_bid:.2f}  {trade['market_name'][:40]}")
+                else:
+                    print(f"[live] Exit reprice repost failed — will retry next cycle")
+            else:
+                print(f"[live] Exit order competitive @ ${current_price:.2f}  "
+                      f"best_bid=${best_bid:.2f}  {trade['market_name'][:40]}")
+
     # ── Resolution settlement ────────────────────────────────────────────────
 
     def settle_resolved(self, trade: dict, resolved_yes: bool):
