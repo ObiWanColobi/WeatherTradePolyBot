@@ -265,6 +265,14 @@ class PaperExecutor(BaseExecutor):
         for leg in legs:
             self.close_full(leg, reason=reason)
 
+    def initiate_exit(self, trade: dict, reason: str):
+        """Paper mode: no GTC orders — close immediately."""
+        self.close_position(trade, reason=reason)
+
+    def manage_pending_exit(self, trade: dict):
+        """Paper mode: no pending exits — no-op."""
+        pass
+
     def settle_resolved(self, trade: dict, resolved_yes: bool):
         """
         Settle a trade at market resolution.
