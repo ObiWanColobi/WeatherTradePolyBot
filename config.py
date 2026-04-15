@@ -69,7 +69,7 @@ WEATHER = {
     # ║  ENTRY CONDITIONS                                                       ║
     # ║  Gates a market must pass before the bot will enter a position           ║
     # ╚═══════════════════════════════════════════════════════════════════════════╝
-    "entry_min_ensemble_conviction": 0.70,  # ensemble must be >=70% or <=30% YES
+    "entry_min_ensemble_conviction": 0.85,  # ensemble must be >=85% or <=15% YES (raised from 0.70 on 2026-04-15 — trade review showed 43% WR in 70–85% tier)
     "entry_min_edge_pct":            0.12,  # model vs market gap (tighter than scanner)
     "entry_min_fill_price":          0.15,  # block entries where the token costs < $0.15 (avoids ultra-cheap tokens where noise dominates price action)
     "entry_min_fill_price_yes":      0.25,  # higher floor for YES tokens — cheap YES bets get killed by adverse exits
