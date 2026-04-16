@@ -56,6 +56,18 @@ def check_weather_exit(trade: dict, market_data: dict, current_ensemble_pct: flo
     # and read from the trade's stored end_date to avoid stale API re-fetches.
     hours_left    = _hours_to_close(trade.get("end_date") or market_data.get("end_date", ""))
 
+    # ── Guard: market already closed → no live orderbook to sell into ────────
+    # Once a market is past close the CLOB stops quoting, so every exit
+    # attempt (late-game divergence, ensemble flip, adverse) ends in
+    # "no midpoint" and loops forever. Hold and wait for resolution.
+    # 30-min grace avoids over-suppression at the close boundary.
+    if hours_left is not None and hours_left < -0.5:
+        return WeatherExitSignal(
+            should_exit=False,
+            reason=f"awaiting resolution ({hours_left:.1f}h past close)",
+            urgent=False,
+        )
+
     fill_price    = trade.get("fill_price", 0.5)
 
     # current_price is maintained by update_open_positions() via CLOB midpoint.
