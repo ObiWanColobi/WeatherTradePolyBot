@@ -1053,7 +1053,10 @@ class LiveExecutor(BaseExecutor):
             return
 
         best_bid = polymarket.get_best_bid(token_id)
-        if best_bid is not None and best_bid > 0.01:
+        if best_bid is None:
+            print(f"[live] Skip exit — orderbook unavailable for {trade['market_name'][:50]}")
+            return
+        if best_bid > 0.01:
             sell_price = round(max(best_bid - 0.01, 0.01), 2)
         else:
             sell_price = 0.01
@@ -1234,7 +1237,10 @@ class LiveExecutor(BaseExecutor):
             self._cancel_order(order_id)
             unfilled = orig_size - size_matched
             best_bid = polymarket.get_best_bid(token_id)
-            reprice = round(max((best_bid or 0.01) - 0.01, 0.01), 2)
+            if best_bid is None:
+                print(f"[live] Partial repost skipped — orderbook unavailable")
+                return
+            reprice = round(max(best_bid - 0.01, 0.01), 2)
             new_resp = self._post_order(token_id, reprice, unfilled, "SELL", order_type="GTC")
             if new_resp:
                 db.update_trade(trade["id"], {
@@ -1253,16 +1259,7 @@ class LiveExecutor(BaseExecutor):
             reprice_step = WEATHER.get("exit_reprice_min_step", 0.01)
 
             if best_bid is None:
-                if current_price > 0.01:
-                    self._cancel_order(order_id)
-                    total_shares = orig_size or sum(l.get("shares", 0) for l in legs)
-                    new_resp = self._post_order(token_id, 0.01, total_shares, "SELL", order_type="GTC")
-                    if new_resp:
-                        db.update_trade(trade["id"], {
-                            "exit_order_id": new_resp.get("orderID", ""),
-                            "exit_order_price": 0.01,
-                            "exit_order_placed_at": datetime.now(timezone.utc).isoformat(),
-                        })
+                print(f"[live] Reprice skipped — orderbook unavailable for {trade['market_name'][:50]}")
                 return
 
             target_price = round(max(best_bid - 0.01, 0.01), 2)
