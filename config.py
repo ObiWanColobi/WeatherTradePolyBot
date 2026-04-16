@@ -136,7 +136,7 @@ WEATHER = {
     # ║  Concentration and exposure caps across all open positions               ║
     # ╚═══════════════════════════════════════════════════════════════════════════╝
     "decision_max_open_positions":          20,   # max concurrent open trades
-    "decision_max_exposure_pct":            .5,  # max total balance % at risk across all open trades
+    "decision_max_exposure_pct":            .8,  # max total balance % at risk across all open trades
     "decision_max_positions_per_city_date":  2,   # max positions per (city, resolution-date) — allows different thresholds, caps concentration
 
     # ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -164,7 +164,7 @@ WEATHER = {
     # ╚═══════════════════════════════════════════════════════════════════════════╝
     "live_kelly_max_bet_usdc":           15.00,   # overrides kelly_max_bet_usdc ($15 vs $200 paper)
     "live_kelly_max_bet_usdc_unanimous": 10.00,   # overrides kelly_max_bet_usdc_unanimous ($10 vs $50 paper)
-    "live_risk_daily_loss_limit_pct":     0.25,   # overrides risk_daily_loss_limit_pct (same for now, tighten as needed)
+    "live_risk_daily_loss_limit_pct":     0.5,   # overrides risk_daily_loss_limit_pct (same for now, tighten as needed)
     "live_risk_auto_reset":              True,   # overrides risk_auto_reset — (False = manual override only, no midnight reset)
 
     # ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -226,7 +226,7 @@ WEATHER = {
     "api_breaker_cooldowns":        [120, 300, 600, 1800, 3600], # escalating seconds
     "clob_inter_request_delay":     0.3,                         # min seconds between CLOB calls
     "heartbeat_stale_threshold":    300,                         # seconds before crash detection fires
-    "dashboard_bot_down_threshold": 180,                         # seconds before dashboard shows offline
+    "dashboard_bot_down_threshold": 300,                         # seconds before dashboard shows offline
 }
 
 # ── API Endpoints ─────────────────────────────────────────────────────────────
