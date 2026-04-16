@@ -57,3 +57,12 @@ class BaseExecutor(ABC):
         Live mode:   submits CTF redeemPositions() transactions and polls
                      for confirmation before crediting the DB balance.
         """
+
+    def sync_positions_with_exchange(self):
+        """
+        Periodic mid-loop check: detect positions gone from the exchange.
+
+        Paper mode:  no-op — no exchange to sync with.
+        Live mode:   fetches wallet positions, closes any DB trades whose
+                     tokens have vanished (manual claims, missed resolutions).
+        """

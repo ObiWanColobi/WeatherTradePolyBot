@@ -46,6 +46,8 @@ class LiveExecutor(BaseExecutor):
     def __init__(self):
         self._client: ClobClient | None = None
         self._claimer: Claimer | None = None
+        self._claimer_none_alerted: bool = False
+        self._oracle_alerted: set[int] = set()
         self._last_clob_call_ts: float = 0.0
         self._init_client(
             WALLET_PRIVATE_KEY,
@@ -685,6 +687,62 @@ class LiveExecutor(BaseExecutor):
 
         avg_price = total_proceeds / total_shares
         return avg_price, total_proceeds, total_fee
+
+    # ── Mid-loop position sync ────────────────────────────────────────────────
+
+    def sync_positions_with_exchange(self):
+        """
+        Periodic check: detect positions gone from the exchange and close them.
+
+        Handles two cases:
+        1. status='open' trades whose token vanished (manually sold, resolved
+           externally, or resolver missed it) → close via _close_stale_position
+        2. status='claim_pending' trades whose token vanished (user claimed
+           manually on Polymarket) → close and credit balance
+        """
+        wallet_addr = WALLET_FUNDER_ADDRESS or self._client.get_address()
+        exchange_positions = polymarket.get_wallet_positions(wallet_addr)
+        if not exchange_positions:
+            # API failure returns [] — skip sync rather than mass-closing trades.
+            # A wallet with genuinely zero positions but open DB trades is also
+            # ambiguous, so always skip when empty.
+            print("[sync] No exchange positions returned — skipping sync")
+            return
+
+        exchange_tokens = {
+            p.get("token_id", "")
+            for p in exchange_positions
+            if p.get("token_id") and p.get("size", 0) > 0.01
+        }
+
+        now = datetime.now(timezone.utc)
+
+        # Case 1: Open trades gone from exchange
+        for trade in db.get_open_trades():
+            tid = trade.get("token_id", "")
+            if tid and tid not in exchange_tokens:
+                print(f"[sync] Open trade #{trade['id']} gone from exchange — closing")
+                self._close_stale_position(trade)
+
+        # Case 2: Claim-pending trades gone from exchange (manually claimed)
+        for trade in db.get_pending_claims():
+            tid = trade.get("token_id", "")
+            if tid and tid not in exchange_tokens:
+                proceeds = trade.get("shares", 0) * 1.0  # winning = $1/share
+                db.update_balance(proceeds)
+                db.update_trade(trade["id"], {
+                    "status":       "closed",
+                    "closed_at":    now.isoformat(),
+                    "claim_status": "claimed_externally",
+                })
+                db.record_account_value()
+                name = trade.get("market_name", "unknown")[:60]
+                print(f"[sync] Claim-pending trade #{trade['id']} gone from "
+                      f"exchange — closed as externally claimed (+${proceeds:.2f})")
+                notify("info", "External Claim Detected",
+                       f"Trade #{trade['id']} was claimed outside the bot.",
+                       fields={"Market": name, "Proceeds": f"${proceeds:.2f}"},
+                       color=COLOR_GREEN)
 
     def _cancel_all_open_orders(self):
         """Cancel all open orders on startup to prevent ghost fills."""
@@ -1367,11 +1425,18 @@ class LiveExecutor(BaseExecutor):
         Checks all trades with claim_status='claim_pending', respects backoff
         schedule, submits CTF redeemPositions(), and credits balance on confirmation.
         """
-        if self._claimer is None:
-            return
-
         pending = db.get_pending_claims()
         if not pending:
+            return
+
+        if self._claimer is None:
+            if not getattr(self, "_claimer_none_alerted", False):
+                self._claimer_none_alerted = True
+                notify("critical", "Claimer Not Initialized",
+                       f"{len(pending)} claim(s) pending but on-chain claimer "
+                       f"failed to initialize. Claims cannot proceed.",
+                       fields={"Pending claims": str(len(pending))})
+            print(f"[claims] Claimer not initialized — {len(pending)} claim(s) waiting")
             return
 
         backoff = WEATHER.get("claim_retry_backoff_minutes", [5, 30, 120, 480, 1440])
@@ -1401,6 +1466,14 @@ class LiveExecutor(BaseExecutor):
             # Check if max retries exceeded (retries > len = exhausted all backoff slots)
             if retries > len(backoff):
                 db.update_trade(trade["id"], {"claim_status": "claim_failed"})
+                notify("critical", "Claim Failed — Max Retries",
+                       f"Trade #{trade['id']} exhausted all {len(backoff)} claim "
+                       f"retries. Manual intervention required.",
+                       fields={
+                           "Market": trade.get("market_name", "")[:60],
+                           "Shares": f"{trade.get('shares', 0):.2f}",
+                           "Last tx": trade.get("claim_tx_hash", "none")[:20],
+                       })
                 print(f"[claims] FAILED (max retries) — trade #{trade['id']} "
                       f"{trade['market_name'][:40]}")
                 continue
@@ -1430,6 +1503,26 @@ class LiveExecutor(BaseExecutor):
             # eliminates the "result for condition not received yet" spam.
             ready = self._claimer.is_condition_resolved(market_id)
             if ready is False:
+                # Alert once if oracle is >3h overdue (2h UMA window should be done)
+                end_str = trade.get("end_date", "")
+                if end_str and trade["id"] not in self._oracle_alerted:
+                    try:
+                        end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                        if end_dt.tzinfo is None:
+                            end_dt = end_dt.replace(tzinfo=timezone.utc)
+                        hours_waiting = (now - end_dt).total_seconds() / 3600
+                        if hours_waiting > 3:
+                            self._oracle_alerted.add(trade["id"])
+                            notify("warning", "Oracle Delayed",
+                                   f"Trade #{trade['id']} has been waiting "
+                                   f"{hours_waiting:.0f}h for UMA oracle. "
+                                   f"Normal window is ~2h.",
+                                   fields={
+                                       "Market": trade.get("market_name", "")[:60],
+                                       "Hours waiting": f"{hours_waiting:.1f}h",
+                                   })
+                    except Exception:
+                        pass
                 print(f"[claims] Oracle not yet posted for trade #{trade['id']}  "
                       f"{trade['market_name'][:40]}… — deferring")
                 continue

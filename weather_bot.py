@@ -37,6 +37,7 @@ POLL_INTERVAL          = WEATHER.get("bot_poll_interval_seconds",  60)
 CACHE_REFRESH          = WEATHER.get("bot_cache_refresh_polls",    10)
 DEFAULT_MAX_BET        = WEATHER.get("kelly_max_bet_usdc",         50.00)
 TRADER_MONITOR_EVERY_N = WEATHER.get("trader_monitor_poll_every_n", 10)
+POSITION_SYNC_EVERY_N  = WEATHER.get("position_sync_poll_every_n",  10)
 
 _layer        = WeatherLayer()
 _risk_manager: RiskManager | None = None
@@ -601,6 +602,13 @@ def run(dry_run: bool = False):
             _executor.process_pending_claims()
         except Exception as e:
             print(f"[claims] process_pending_claims error (non-fatal): {e}")
+
+        # Position sync — detect trades gone from exchange (manual claims, missed resolutions)
+        if poll % POSITION_SYNC_EVERY_N == 0:
+            try:
+                _executor.sync_positions_with_exchange()
+            except Exception as e:
+                print(f"[sync] sync_positions_with_exchange error (non-fatal): {e}")
 
         # Risk check — portfolio-level circuit breaker
         risk_state = _risk_manager.check()

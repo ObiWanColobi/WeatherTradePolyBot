@@ -20,7 +20,8 @@ closed (status='closed') but never deleted.
 from datetime import datetime, timezone
 
 import db
-from markets.polymarket import get_midpoint, get_market_by_id
+from markets.polymarket import get_midpoint, get_market_by_id, get_resolution_status
+from notifications import notify
 
 # YES price thresholds to confirm resolution has occurred
 _RESOLVED_YES_THRESHOLD = 0.98   # above this = resolved YES
@@ -86,13 +87,30 @@ def run_resolve_pass(executor) -> int:
             if direction == "NO":
                 yes_price = 1.0 - yes_price
         else:
-            # CLOB midpoint unavailable (orderbook torn down). Fall back to
-            # Gamma/CLOB API to check if market is resolved with outcome prices.
-            market_info = get_market_by_id(trade.get("market_id", ""))
-            if market_info and market_info.get("resolved"):
-                yes_price = market_info.get("price")  # Gamma YES price
+            # CLOB midpoint unavailable (orderbook torn down). Try multiple
+            # fallbacks to determine resolution status.
+            market_id = trade.get("market_id", "")
+
+            # Fallback 1: CLOB /markets/ endpoint — has token `winner` field
+            # and token prices even after orderbook is torn down.
+            resolution = get_resolution_status(market_id)
+            if resolution and resolution.get("resolved"):
+                yes_price = resolution["yes_price"]
+
+            # Fallback 2: Gamma API — has outcomePrices and closed flag
             if yes_price is None:
-                print(f"  [resolve] CLOB midpoint unavailable for {trade['market_name'][:50]} — skipping")
+                market_info = get_market_by_id(market_id)
+                if market_info and market_info.get("resolved"):
+                    yes_price = market_info.get("price")
+
+            if yes_price is None:
+                # All sources failed — alert if market is very stale (>6h past close)
+                hours_past = (now - end).total_seconds() / 3600
+                if hours_past > 6:
+                    _alert_stale_unresolved(trade, hours_past)
+                else:
+                    print(f"  [resolve] CLOB midpoint unavailable for "
+                          f"{trade['market_name'][:50]} — skipping")
                 continue
 
         # Only settle if price has actually resolved to near-binary
@@ -109,3 +127,29 @@ def run_resolve_pass(executor) -> int:
         settled += 1
 
     return settled
+
+
+# Track which trades have already sent a stale alert to avoid spam
+_stale_alerted: set[int] = set()
+
+
+def _alert_stale_unresolved(trade: dict, hours_past: float):
+    """Send a one-time Discord alert for a trade stuck unresolved >6h past close."""
+    trade_id = trade["id"]
+    if trade_id in _stale_alerted:
+        return
+    _stale_alerted.add(trade_id)
+    name = trade.get("market_name", "unknown")[:60]
+    notify(
+        "warning",
+        "Stale Unresolved Trade",
+        f"Trade #{trade_id} is {hours_past:.0f}h past market close "
+        f"and no API source confirms resolution.",
+        fields={
+            "Market": name,
+            "Direction": trade.get("direction", "?"),
+            "Hours past close": f"{hours_past:.1f}h",
+        },
+    )
+    print(f"  [resolve] ALERT: {name} is {hours_past:.0f}h past close — "
+          f"no resolution detected from any source")

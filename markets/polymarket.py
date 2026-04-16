@@ -412,3 +412,56 @@ def get_market_tokens(condition_id: str) -> dict | None:
         return result if result.get("yes_token_id") else None
     except Exception:
         return None
+
+
+def get_resolution_status(condition_id: str) -> dict | None:
+    """
+    Check if a market is resolved via the CLOB /markets/ endpoint.
+
+    The CLOB response includes a `tokens` array where each token has a
+    `winner` boolean once the market resolves.  Also checks the top-level
+    `closed` flag.
+
+    Returns:
+        {"resolved": True, "yes_price": 1.0|0.0}  — market resolved
+        {"resolved": False}                        — market not yet resolved
+        None                                       — API call failed
+    """
+    try:
+        resp = requests.get(
+            f"{POLYMARKET_CLOB_API}/markets/{condition_id}",
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+
+        # Check tokens array for winner field
+        tokens = data.get("tokens", [])
+        for t in tokens:
+            outcome = (t.get("outcome") or "").upper()
+            winner = t.get("winner")
+            if winner is True and outcome == "YES":
+                return {"resolved": True, "yes_price": 1.0}
+            if winner is True and outcome == "NO":
+                return {"resolved": True, "yes_price": 0.0}
+
+        # No winner field set — check if market is at least closed
+        if data.get("closed") is True:
+            # Market closed but no winner yet (still in UMA resolution window).
+            # Try to infer from token prices if available.
+            for t in tokens:
+                outcome = (t.get("outcome") or "").upper()
+                price = t.get("price")
+                if price is not None and outcome == "YES":
+                    price = float(price)
+                    if price >= 0.98:
+                        return {"resolved": True, "yes_price": 1.0}
+                    elif price <= 0.02:
+                        return {"resolved": True, "yes_price": 0.0}
+            return {"resolved": False}
+
+        return {"resolved": False}
+    except Exception as e:
+        print(f"[polymarket] get_resolution_status failed for {condition_id}: {e}")
+        return None

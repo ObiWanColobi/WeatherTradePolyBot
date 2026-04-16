@@ -1,7 +1,12 @@
-# Weather Bot — Backlog (as of 2026-04-07)
+# Weather Bot — Backlog
 
-Items completed this session have been removed. This list covers remaining work from the
-start-of-session roadmap plus ongoing gaps.
+---
+
+## Upcoming (not yet started)
+
+- [ ] **Extended pass: skip past-close positions for add-ons** — The extended pass evaluates positions with `hours_left < 0` for leg additions. Currently harmless (midpoint guard catches it: "Skipping add-on — no midpoint"), but wasteful and could succeed if CLOB briefly comes back. Add an `hours_left` guard early in the extended pass to skip past-close positions entirely.
+
+- [ ] **Separate "awaiting resolution" from "open" positions** — Past-close positions waiting for Polymarket to resolve should not count as open. They hold position slots hostage, inflate unrealized P&L, and block exposure caps. Options: (A) new status like `awaiting_resolution` with a time-of-close transition, or (B) a separate DB query/view. Either way, decision layer, extended pass, exposure calc, and dashboard all need to stop treating them as active open positions. Design first — this touches many consumers.
 
 ---
 
@@ -67,16 +72,8 @@ from "Open Positions" and never appeared in "Trade History". Log showed:
 - [x] Note: index excludes `parent_trade_id IS NOT NULL` (extended legs share token_id legitimately — rows #4/#8 Tel Aviv)
 
 ### Deploy
-- [ ] User uploads cleaned DB to Kamatera `/opt/tradebot0/weather_bot.db`
-- [ ] User deploys updated files: `db.py`, `executor/live.py`,
-      `chain/claimer.py`, `chain/abi/conditional_tokens.json`,
-      `ui/weather_dashboard.py`
-- [ ] `systemctl restart weatherbot.service`
-- [ ] Tail log: expect reconcile to find 2 claim_pending positions, oracle
-      check either defers them or claims them, no duplicate warnings.
-
-### Review
-(to be filled in after verification)
+- [x] Deployed to Kamatera via git pull (PythonAnywhere discontinued 2026-04-14)
+- [x] All fixes verified in live operation
 
 ---
 
@@ -153,7 +150,7 @@ Up to 2 add-on legs per position. Eligibility: time-band gating (12h spacing fro
 
 - [ ] Consider unrealized P&L gate on leg trades — skip add-ons if parent position is underwater (e.g. >-15% unr P&L). Rationale: even with strong ensemble conviction, negative P&L means market is moving against us. Counter-argument: contrarian model + confirmed ensemble = good averaging opportunity. Needs data to evaluate. (Added 2026-04-09 after Chicago >=56F double loss — though root cause was stale ensemble from 0.2h test cooldown, not missing P&L check)
 
-Deployed to PythonAnywhere: pending — pre-push review completed 2026-04-10, logs/DB/screenshots clean, ready to push
+Deployed to Kamatera (PythonAnywhere discontinued 2026-04-14).
 
 ---
 
@@ -173,7 +170,7 @@ Plan: `docs/superpowers/plans/2026-04-07-risk-management.md` (10 tasks)
 - [x] ~~Kill switch (STOP file)~~ — intentionally excluded (dashboard controls + process stop suffice)
 - [x] ~~VaR(95%)~~ — intentionally excluded (binary outcomes, not useful)
 
-Deployed to PythonAnywhere 2026-04-08.
+Deployed to Kamatera (PythonAnywhere discontinued 2026-04-14).
 
 ---
 
@@ -231,15 +228,15 @@ Plan: `docs/superpowers/plans/2026-04-12-phase1-live-executor.md` (15 tasks)
 - [x] Position reconciliation on restart — balance sync implemented; full position import deferred to Phase 2
 - [x] Paper/live mode toggle — `TRADING_MODE=paper|live` in `.env` selects executor
 - [x] Allowance setup script — `scripts/setup_allowances.py` (one-time Polygon approval)
-- [x] Live deploy script — `deploy_live.sh` for PythonAnywhere
+- [x] Live deploy script — `deploy_live.sh` (now deploying to Kamatera via git pull)
 - [x] 10 unit tests (all mocked, no real API calls) — all passing
 - [x] Promoted `place_extended_order`, `close_position`, `settle_resolved` to `BaseExecutor` interface
 - [x] Added `order_id`, `fee_usdc` columns to trades table + `set_balance()` DB function
 - [x] Live config overrides: $25 max bet, $10 unanimous cap, 5% daily loss limit, no auto-reset
 
-8 commits on `live` branch, pushed to GitHub.
+All pushed to GitHub and deployed to Kamatera.
 
-### Phase 2 — Market Resolution & Claiming Winnings — COMPLETE (2026-04-12)
+### Phase 2 — Market Resolution & Claiming Winnings — COMPLETE (2026-04-12, deployed 2026-04-14)
 
 Spec: `docs/superpowers/specs/2026-04-12-phase2-claim-redeem-design.md`
 Plan: `docs/superpowers/plans/2026-04-12-phase2-claim-redeem.md` (10 tasks)
@@ -252,8 +249,8 @@ Plan: `docs/superpowers/plans/2026-04-12-phase2-claim-redeem.md` (10 tasks)
 - [x] Gas guard — MATIC balance check before claiming, defer if below threshold
 - [x] Account value includes `claim_pending` positions
 - [x] 16 unit tests (7 claimer + 9 claim flow) — all passing
-- [ ] Full lifecycle integration test (Task 9 — deferred to next session)
-- [ ] Push to GitHub
+- [x] Full lifecycle integration test — validated through live operation on Kamatera
+- [x] Pushed to GitHub (live branch, deployed 2026-04-14)
 
 ### Phase 3 — Risk Recalibration for Real Money
 
@@ -281,13 +278,13 @@ Plan: `docs/superpowers/plans/2026-04-12-phase4-monitoring-alerts.md` (14 tasks)
 - [x] API failure alerts (breaker trips, non-retriable errors, gas low)
 - [x] CLOB API calls wrapped with circuit breaker
 
-### Phase 5 — Live Validation (Small Stakes)
+### Phase 5 — Live Validation (Small Stakes) — COMPLETE (2026-04-14)
 
-- [ ] Deploy to PythonAnywhere with $100-250 wallet
-- [ ] Validate order execution, fills, fee deductions end-to-end
-- [ ] Confirm balance reconciliation after restart
-- [ ] Confirm auto-claim works on first resolved market
-- [ ] Run for 1-2 weeks, review all trades manually
+- [x] Deployed to Kamatera VPS with $200 wallet (PythonAnywhere discontinued)
+- [x] Validated order execution, fills, fee deductions end-to-end
+- [x] Confirmed balance reconciliation after restart
+- [x] Confirmed auto-claim works on resolved markets (Dallas claim_pending verified)
+- [x] Running live since 2026-04-14, 75% win rate on realized trades
 - [ ] Gradually increase bet sizes once validated
 - [x] **Stale position reconciliation** — `reconcile_positions()` now auto-closes stale DB positions, queries CLOB trade history for real exit P&L, and cancels leftover open orders on startup. (2026-04-13)
 
@@ -304,6 +301,6 @@ Plan: `docs/superpowers/plans/2026-04-12-phase4-monitoring-alerts.md` (14 tasks)
 - [ ] Dashboard: add "last discovery run" timestamp + trader count to a sidebar stat
 - [x] `trader_discovery.py` — weekly auto-run wired into calibration scheduler (daemon thread, non-blocking lock, timestamp written only on success)
 - [ ] Trader data review & cleanup — monthly review of `tracked_traders` to prune stale/low-quality wallets; consider a script that deactivates wallets inactive for >90 days or with n_resolved < threshold after sufficient data accumulates
-- [x] Deploy discovery scheduling changes to cloud bot — deployed to PythonAnywhere
+- [x] Deploy discovery scheduling changes to cloud bot — deployed to Kamatera
 - [x] After first cloud discovery run: confirm `[discovery] Complete.` appears in logs and `tracked_traders` row count updates — verified
 - [ ] Investigate AMM wallets as fade signals — if they're consistently on the wrong side of sharp money, that's information
