@@ -20,7 +20,7 @@ closed (status='closed') but never deleted.
 from datetime import datetime, timezone
 
 import db
-from markets.polymarket import get_midpoint
+from markets.polymarket import get_midpoint, get_market_by_id
 
 # YES price thresholds to confirm resolution has occurred
 _RESOLVED_YES_THRESHOLD = 0.98   # above this = resolved YES
@@ -77,16 +77,23 @@ def run_resolve_pass(executor) -> int:
         # However, we can also resolve from the NO token: if NO token mid ~0.999
         # then resolved NO (our token won); if ~0.001 then resolved YES (our token lost).
         yes_price = get_midpoint(token_id)
-        if yes_price is None:
-            print(f"  [resolve] CLOB midpoint unavailable for {trade['market_name'][:50]} — skipping")
-            continue
 
         direction = (trade.get("direction") or "YES").upper()
 
-        # For NO trades, token_id is the NO token, so midpoint is the NO price.
-        # Convert to YES price for consistent resolution logic.
-        if direction == "NO":
-            yes_price = 1.0 - yes_price
+        if yes_price is not None:
+            # For NO trades, token_id is the NO token, so midpoint is the NO price.
+            # Convert to YES price for consistent resolution logic.
+            if direction == "NO":
+                yes_price = 1.0 - yes_price
+        else:
+            # CLOB midpoint unavailable (orderbook torn down). Fall back to
+            # Gamma/CLOB API to check if market is resolved with outcome prices.
+            market_info = get_market_by_id(trade.get("market_id", ""))
+            if market_info and market_info.get("resolved"):
+                yes_price = market_info.get("price")  # Gamma YES price
+            if yes_price is None:
+                print(f"  [resolve] CLOB midpoint unavailable for {trade['market_name'][:50]} — skipping")
+                continue
 
         # Only settle if price has actually resolved to near-binary
         if yes_price >= _RESOLVED_YES_THRESHOLD:
