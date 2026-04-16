@@ -467,6 +467,34 @@ class LiveExecutor(BaseExecutor):
             volume     = market_info.get("volume")
             yes_price  = market_info.get("price") or 0.5
 
+        # ── Guard: skip stubs for closed/resolved markets ────────────────────
+        # Orphaned tokens from already-closed markets should be redeemed
+        # on-chain (or manually), not re-hydrated as open trades. Re-importing
+        # them causes infinite exit loops because there's no live orderbook.
+        # When market_info is None (Gamma outage) we fall through to preserve
+        # the legitimate "short outage, resume a new position" case.
+        is_resolved   = bool(market_info and market_info.get("resolved"))
+        hours_left    = _hours_until(end_date) if end_date else None
+        is_past_close = hours_left is not None and hours_left < -0.5  # 30-min grace
+        if is_resolved or is_past_close:
+            reason = "resolved" if is_resolved else f"past close ({hours_left:.1f}h)"
+            label  = (question or market_id or token_id or "?")[:50]
+            print(f"       SKIPPED: orphaned wallet stub — {reason}  "
+                  f"{label}  shares={shares:.2f}  avg=${avg_price:.4f}")
+            notify(
+                "warning",
+                "Orphaned wallet stub skipped",
+                f"Wallet holds {shares:.2f} shares for a {reason} market — "
+                f"not importing as an open trade. Redeem manually on "
+                f"Polymarket if the tokens are worth anything.",
+                fields={
+                    "Market": question or market_id or "?",
+                    "Shares": f"{shares:.2f}",
+                    "Avg $":  f"{avg_price:.4f}",
+                },
+            )
+            return
+
         # Determine direction from outcome field or token matching
         outcome = pos.get("outcome", "").upper()
         if outcome in ("YES", "NO"):

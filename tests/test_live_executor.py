@@ -277,3 +277,130 @@ def test_reconcile_syncs_balance_from_exchange(mock_db):
     ex.reconcile_positions()
 
     mock_db.set_balance.assert_called_once_with(75.0)
+
+
+# ── _import_orphaned_position: closed-market guard ──────────────────────────
+#
+# Regression: after restart, wallet tokens for markets that have already
+# closed/resolved must not be imported as fresh open trades. Previously this
+# caused an infinite exit-loop (CLOB stops quoting, "no midpoint" spam).
+
+def _orphan_pos():
+    return {
+        "market_id":     "cond-orphan",
+        "token_id":      "tok-orphan",
+        "outcome":       "NO",
+        "size":          15.10,
+        "avg_price":     0.65,
+        "current_price": 0.0,
+    }
+
+
+@patch("executor.live.notify")
+@patch("executor.live.polymarket")
+@patch("executor.live.db")
+def test_import_orphaned_skips_resolved_market(mock_db, mock_pm, mock_notify):
+    from executor.live import LiveExecutor
+
+    mock_pm.get_market_by_id.return_value = {
+        "question":   "Will the highest temperature in Denver be 66F or higher?",
+        "end_date":   "2026-04-13T23:59:59Z",
+        "market_url": "https://polymarket.com/event/x",
+        "liquidity":  0,
+        "volume":     0,
+        "price":      0.99,
+        "resolved":   True,
+    }
+
+    ex = LiveExecutor.__new__(LiveExecutor)
+    ex._client = MagicMock()
+    ex._import_orphaned_position(_orphan_pos())
+
+    mock_db.insert_trade.assert_not_called()
+    mock_notify.assert_called_once()
+    args, kwargs = mock_notify.call_args
+    assert args[0] == "warning"
+    assert "Orphaned wallet stub skipped" in args[1]
+    assert "resolved" in args[2]
+
+
+@patch("executor.live.notify")
+@patch("executor.live.polymarket")
+@patch("executor.live.db")
+def test_import_orphaned_skips_past_close_market(mock_db, mock_pm, mock_notify):
+    from datetime import datetime, timedelta, timezone
+    from executor.live import LiveExecutor
+
+    two_hours_ago = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    mock_pm.get_market_by_id.return_value = {
+        "question":   "Will the highest temperature in Hong Kong be 30C or higher?",
+        "end_date":   two_hours_ago,
+        "market_url": "https://polymarket.com/event/y",
+        "liquidity":  0,
+        "volume":     0,
+        "price":      0.01,
+        "resolved":   False,  # Gamma hasn't flipped the flag yet
+    }
+
+    ex = LiveExecutor.__new__(LiveExecutor)
+    ex._client = MagicMock()
+    ex._import_orphaned_position(_orphan_pos())
+
+    mock_db.insert_trade.assert_not_called()
+    mock_notify.assert_called_once()
+    assert "past close" in mock_notify.call_args[0][2]
+
+
+@patch("layers.layer3_weather.WeatherLayer")
+@patch("layers.layer3_weather.parse_weather_market")
+@patch("executor.live.notify")
+@patch("executor.live.polymarket")
+@patch("executor.live.db")
+def test_import_orphaned_imports_active_market(
+    mock_db, mock_pm, mock_notify, mock_parse, mock_layer
+):
+    from datetime import datetime, timedelta, timezone
+    from executor.live import LiveExecutor
+
+    future = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+    mock_pm.get_market_by_id.return_value = {
+        "question":   "Will the highest temperature in Tokyo be 24C or higher?",
+        "end_date":   future,
+        "market_url": "https://polymarket.com/event/z",
+        "liquidity":  100000,
+        "volume":     50000,
+        "price":      0.40,
+        "resolved":   False,
+    }
+    mock_parse.return_value = None
+    mock_layer.return_value.scan.return_value = None
+
+    ex = LiveExecutor.__new__(LiveExecutor)
+    ex._client = MagicMock()
+    ex._import_orphaned_position(_orphan_pos())
+
+    mock_db.insert_trade.assert_called_once()
+    mock_notify.assert_not_called()
+
+
+@patch("layers.layer3_weather.WeatherLayer")
+@patch("layers.layer3_weather.parse_weather_market")
+@patch("executor.live.notify")
+@patch("executor.live.polymarket")
+@patch("executor.live.db")
+def test_import_orphaned_imports_when_market_info_missing(
+    mock_db, mock_pm, mock_notify, mock_parse, mock_layer
+):
+    """Gamma outage: preserve existing import behavior, don't skip."""
+    from executor.live import LiveExecutor
+
+    mock_pm.get_market_by_id.return_value = None
+    mock_parse.return_value = None
+    mock_layer.return_value.scan.return_value = None
+
+    ex = LiveExecutor.__new__(LiveExecutor)
+    ex._client = MagicMock()
+    ex._import_orphaned_position(_orphan_pos())
+
+    mock_db.insert_trade.assert_called_once()
+    mock_notify.assert_not_called()
