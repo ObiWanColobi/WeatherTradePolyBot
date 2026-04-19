@@ -96,28 +96,6 @@ class Claimer:
             print(f"[claimer] get_token_balance error: {e}")
             return 0
 
-    def is_condition_resolved(self, condition_id: str) -> bool | None:
-        """
-        Return True if the UMA oracle has reported this condition on-chain.
-
-        Uses CTF.payoutDenominator(conditionId): non-zero once the condition
-        has been resolved via reportPayouts(). Zero means the oracle hasn't
-        posted yet and redeemPositions() will revert with "result for
-        condition not received yet".
-
-        Returns:
-            True  — oracle has reported, safe to call claim_winnings()
-            False — oracle has NOT reported, claim would revert
-            None  — RPC call failed, caller should treat as transient error
-        """
-        try:
-            cond_bytes = bytes.fromhex(condition_id.replace("0x", ""))
-            denom = self._ctf.functions.payoutDenominator(cond_bytes).call()
-            return denom > 0
-        except Exception as e:
-            print(f"[claimer] is_condition_resolved RPC error: {e}")
-            return None
-
     def is_condition_redeemable(self, condition_id: str) -> bool | None:
         """Return True if CTF has resolved this condition (payoutDenominator > 0).
 
