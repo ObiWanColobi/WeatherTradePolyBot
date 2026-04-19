@@ -1,8 +1,16 @@
 """
 On-chain claim/redeem for Polymarket resolved markets.
 
-Uses web3.py to call redeemPositions() on the Conditional Tokens Framework
-(CTF) contract on Polygon. Stateless — receives parameters, returns results.
+Polymarket uses POLY_PROXY (SignatureType=1) wallet architecture: the user's
+EOA is NOT the owner of the winning conditional tokens. A per-user ProxyWallet
+(deployed via CREATE2 by ProxyWalletFactory) holds the tokens, and only the
+Factory (as `msg.sender == owner`) is authorized to invoke `ProxyWallet.proxy()`.
+
+To redeem, we call:
+    Factory.proxy([ProxyCall(CallType.CALL, CTF, 0, redeemPositions_calldata)])
+
+The Factory derives the caller's proxy address from `_msgSender()` via CREATE2
+and forwards the calls. The EOA signs the outer tx.
 """
 import json
 import os
@@ -12,14 +20,37 @@ from web3 import Web3
 # Polygon contract addresses
 _USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 _CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+_PROXY_FACTORY_ADDRESS = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052"
 _CHAIN_ID = 137
 
-# Load ABI from adjacent file
+# CallType enum from ProxyWalletLib: INVALID=0, CALL=1, DELEGATECALL=2
+_CALL_TYPE_CALL = 1
+
+# Minimal ABI for ProxyWalletFactory.proxy((uint8,address,uint256,bytes)[])
+_FACTORY_ABI = [{
+    "inputs": [{
+        "components": [
+            {"internalType": "enum ProxyWalletLib.CallType", "name": "typeCode", "type": "uint8"},
+            {"internalType": "address payable", "name": "to", "type": "address"},
+            {"internalType": "uint256", "name": "value", "type": "uint256"},
+            {"internalType": "bytes", "name": "data", "type": "bytes"},
+        ],
+        "internalType": "struct ProxyWalletLib.ProxyCall[]",
+        "name": "calls",
+        "type": "tuple[]",
+    }],
+    "name": "proxy",
+    "outputs": [{"internalType": "bytes[]", "name": "returnValues", "type": "bytes[]"}],
+    "stateMutability": "payable",
+    "type": "function",
+}]
+
+# Load CTF ABI from adjacent file
 _ABI_PATH = os.path.join(os.path.dirname(__file__), "abi", "conditional_tokens.json")
 
 
 class Claimer:
-    """Handles on-chain claiming of winning conditional tokens."""
+    """Handles on-chain claiming of winning conditional tokens via Polymarket proxy."""
 
     def __init__(self, rpc_url: str, private_key: str):
         self._w3 = Web3(Web3.HTTPProvider(rpc_url))
@@ -30,10 +61,14 @@ class Claimer:
         self._address = self._account.address
 
         with open(_ABI_PATH) as f:
-            abi = json.load(f)
+            ctf_abi = json.load(f)
         self._ctf = self._w3.eth.contract(
             address=self._w3.to_checksum_address(_CTF_ADDRESS),
-            abi=abi,
+            abi=ctf_abi,
+        )
+        self._factory = self._w3.eth.contract(
+            address=self._w3.to_checksum_address(_PROXY_FACTORY_ADDRESS),
+            abi=_FACTORY_ABI,
         )
 
     def get_matic_balance(self) -> float:
@@ -65,7 +100,12 @@ class Claimer:
 
     def claim_winnings(self, condition_id: str, index_sets: list[int]) -> str | None:
         """
-        Call CTF redeemPositions() to claim winning shares.
+        Redeem winning CTF shares held by the user's Polymarket proxy wallet.
+
+        Encodes `CTF.redeemPositions(USDC, 0, conditionId, indexSets)` as
+        calldata and submits it via `ProxyWalletFactory.proxy([ProxyCall(...)])`.
+        The Factory resolves the caller's proxy wallet (CREATE2 derived from
+        msg.sender) and forwards the call.
 
         Args:
             condition_id: Market condition ID (hex bytes32).
@@ -75,17 +115,30 @@ class Claimer:
             Transaction hash hex string, or None on failure.
         """
         try:
-            nonce = self._w3.eth.get_transaction_count(self._address)
-
-            # Convert condition_id string to bytes32
             cond_bytes = bytes.fromhex(condition_id.replace("0x", ""))
 
-            tx = self._ctf.functions.redeemPositions(
+            # 1. Encode the inner CTF.redeemPositions(...) calldata.
+            # Use _encode_transaction_data() which is stable across web3.py v6/v7.
+            inner_fn = self._ctf.functions.redeemPositions(
                 self._w3.to_checksum_address(_USDC_ADDRESS),
                 b"\x00" * 32,   # parentCollectionId = bytes32(0)
                 cond_bytes,
                 index_sets,
-            ).build_transaction({
+            )
+            inner_hex = inner_fn._encode_transaction_data()
+            inner_bytes = bytes.fromhex(inner_hex[2:] if inner_hex.startswith("0x") else inner_hex)
+
+            # 2. Wrap as a ProxyCall directed at the CTF contract
+            proxy_call = (
+                _CALL_TYPE_CALL,
+                self._w3.to_checksum_address(_CTF_ADDRESS),
+                0,
+                inner_bytes,
+            )
+
+            # 3. Build the outer Factory.proxy([call]) transaction
+            nonce = self._w3.eth.get_transaction_count(self._address)
+            tx = self._factory.functions.proxy([proxy_call]).build_transaction({
                 "chainId": _CHAIN_ID,
                 "from": self._address,
                 "nonce": nonce,
