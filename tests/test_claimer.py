@@ -117,3 +117,13 @@ def test_check_tx_status_pending(MockWeb3, mock_web3):
     c = Claimer(rpc_url="https://polygon-rpc.com", private_key="0x" + "ab" * 32)
     status = c.check_tx_status("0x" + "ab" * 32)
     assert status == "pending"
+
+
+@patch("chain.claimer.Web3")
+def test_claimer_init_loads_wcol(MockWeb3, mock_web3):
+    MockWeb3.return_value = mock_web3
+    MockWeb3.HTTPProvider = MagicMock()
+    from chain.claimer import Claimer, _WCOL_ADDRESS
+    c = Claimer(rpc_url="https://polygon-rpc.com", private_key="0x" + "ab" * 32)
+    assert _WCOL_ADDRESS.lower() == "0x3a3bd7bb9528e159577f7c2e685cc81a765002e2"
+    assert c._wcol is not None

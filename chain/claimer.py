@@ -20,6 +20,7 @@ from web3 import Web3
 # Polygon contract addresses
 _USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 _CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+_WCOL_ADDRESS = "0x3A3BD7bb9528E159577F7C2e685CC81A765002E2"
 _PROXY_FACTORY_ADDRESS = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052"
 _CHAIN_ID = 137
 
@@ -47,6 +48,7 @@ _FACTORY_ABI = [{
 
 # Load CTF ABI from adjacent file
 _ABI_PATH = os.path.join(os.path.dirname(__file__), "abi", "conditional_tokens.json")
+_WCOL_ABI_PATH = os.path.join(os.path.dirname(__file__), "abi", "wrapped_collateral.json")
 
 
 class Claimer:
@@ -65,6 +67,12 @@ class Claimer:
         self._ctf = self._w3.eth.contract(
             address=self._w3.to_checksum_address(_CTF_ADDRESS),
             abi=ctf_abi,
+        )
+        with open(_WCOL_ABI_PATH) as f:
+            wcol_abi = json.load(f)
+        self._wcol = self._w3.eth.contract(
+            address=self._w3.to_checksum_address(_WCOL_ADDRESS),
+            abi=wcol_abi,
         )
         self._factory = self._w3.eth.contract(
             address=self._w3.to_checksum_address(_PROXY_FACTORY_ADDRESS),
