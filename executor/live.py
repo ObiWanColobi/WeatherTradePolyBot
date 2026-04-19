@@ -1490,18 +1490,16 @@ class LiveExecutor(BaseExecutor):
                 except Exception:
                     pass  # unparseable timestamp — proceed with claim
 
-            # Determine index set: [1] for YES tokens, [2] for NO tokens
-            direction = (trade.get("direction") or "YES").upper()
-            index_sets = [1] if direction == "YES" else [2]
-
             market_id = trade.get("market_id", "")
+            token_id = trade.get("token_id")
+            if not token_id:
+                print(f"[claims] Trade #{trade['id']} missing token_id — skipping")
+                continue
 
-            # Gate on on-chain oracle readiness. The resolver uses CLOB
-            # midpoint (Polymarket orderbook) to detect settlement, but the
-            # UMA oracle reports payouts to the CTF contract on its own
-            # schedule. Skipping silently here prevents retry-slot burn and
-            # eliminates the "result for condition not received yet" spam.
-            ready = self._claimer.is_condition_resolved(market_id)
+            # Gate on CTF payoutDenominator (neg-risk adapter path is broken —
+            # we redeem directly against CTF with wcol as collateral, then
+            # unwrap wcol -> USDC in one bundled tx).
+            ready = self._claimer.is_condition_redeemable(market_id)
             if ready is False:
                 # Alert once if oracle is >3h overdue (2h UMA window should be done)
                 end_str = trade.get("end_date", "")
@@ -1528,7 +1526,7 @@ class LiveExecutor(BaseExecutor):
                 continue
             if ready is None:
                 # Transient RPC failure — do not burn a retry, try next cycle
-                print(f"[claims] Oracle check failed for trade #{trade['id']} "
+                print(f"[claims] Redeemable check failed for trade #{trade['id']} "
                       f"(RPC error) — will retry next cycle")
                 continue
 
@@ -1544,7 +1542,7 @@ class LiveExecutor(BaseExecutor):
                           f"tx={existing_tx[:16]}... — skipping resubmit")
                     continue
                 if existing_status == "confirmed":
-                    proceeds = trade["shares"] * 1.0
+                    proceeds = float(trade["shares"])
                     db.update_balance(proceeds)
                     db.update_trade(trade["id"], {
                         "status": "closed",
@@ -1563,12 +1561,27 @@ class LiveExecutor(BaseExecutor):
                 # "failed" → fall through; clear tx_hash so next submit is fresh
                 db.update_trade(trade["id"], {"claim_tx_hash": None})
 
+            # Read the proxy's token balance just-in-time (don't trust db shares).
+            # For binary neg-risk markets, the winning-side CTF balance equals the
+            # wcol amount we'll unwrap.
+            balance_raw = self._claimer.get_token_balance(
+                proxy_address=WALLET_FUNDER_ADDRESS, token_id=int(token_id),
+            )
+            if balance_raw == 0:
+                print(f"[claims] Trade #{trade['id']} has 0 balance at token_id — "
+                      f"marking as already redeemed elsewhere, skipping")
+                db.update_trade(trade["id"], {
+                    "claim_status": "claim_no_balance",
+                    "claim_last_attempt": now.isoformat(),
+                })
+                continue
+
             print(f"[claims] Attempting claim for trade #{trade['id']}  "
-                  f"{trade['market_name'][:40]}...")
+                  f"{trade['market_name'][:40]}... ({balance_raw/1e6:.4f} shares)")
 
             tx_hash = self._claimer.claim_winnings(
                 condition_id=market_id,
-                index_sets=index_sets,
+                expected_wcol=balance_raw,
             )
 
             if tx_hash is None:
@@ -1591,7 +1604,7 @@ class LiveExecutor(BaseExecutor):
                 time.sleep(2)
 
             if status == "confirmed":
-                proceeds = trade["shares"] * 1.0  # winning shares = $1.00 each
+                proceeds = balance_raw / 1_000_000  # wcol is 6-decimal, unwraps 1:1 to USDC
                 db.update_balance(proceeds)
                 db.update_trade(trade["id"], {
                     "status": "closed",

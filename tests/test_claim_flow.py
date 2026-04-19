@@ -95,6 +95,8 @@ def test_process_pending_claims_confirms_successful_claim(mock_db):
 
     mock_claimer = MagicMock()
     mock_claimer.get_matic_balance.return_value = 1.0
+    mock_claimer.is_condition_redeemable.return_value = True
+    mock_claimer.get_token_balance.return_value = 20_000_000  # 20 wcol = $20
     mock_claimer.claim_winnings.return_value = "0xabc123"
     mock_claimer.check_tx_status.return_value = "confirmed"
 
@@ -106,6 +108,7 @@ def test_process_pending_claims_confirms_successful_claim(mock_db):
         "id": 10, "market_id": "0x" + "ab" * 32,
         "market_name": "Will NYC be above 60F?",
         "direction": "YES", "shares": 20.0, "size_usdc": 10.0,
+        "token_id": "12345",
         "claim_status": "claim_pending", "claim_retries": 0,
         "claim_last_attempt": None, "claim_tx_hash": None,
     }
@@ -118,7 +121,7 @@ def test_process_pending_claims_confirms_successful_claim(mock_db):
     assert update["claim_status"] == "claim_confirmed"
     assert update["claim_tx_hash"] == "0xabc123"
     assert "closed_at" in update
-    mock_db.update_balance.assert_called_once_with(20.0)  # 20 shares * $1.00
+    mock_db.update_balance.assert_called_once_with(20.0)  # balance_raw/1e6
 
 
 @patch("executor.live.db")
@@ -128,6 +131,8 @@ def test_process_pending_claims_retries_on_failure(mock_db):
 
     mock_claimer = MagicMock()
     mock_claimer.get_matic_balance.return_value = 1.0
+    mock_claimer.is_condition_redeemable.return_value = True
+    mock_claimer.get_token_balance.return_value = 20_000_000
     mock_claimer.claim_winnings.return_value = None  # tx submission failed
 
     ex = LiveExecutor.__new__(LiveExecutor)
@@ -138,6 +143,7 @@ def test_process_pending_claims_retries_on_failure(mock_db):
         "id": 10, "market_id": "0x" + "ab" * 32,
         "market_name": "Will NYC be above 60F?",
         "direction": "YES", "shares": 20.0, "size_usdc": 10.0,
+        "token_id": "12345",
         "claim_status": "claim_pending", "claim_retries": 0,
         "claim_last_attempt": None, "claim_tx_hash": None,
     }
