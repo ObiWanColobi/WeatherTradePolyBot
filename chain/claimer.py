@@ -17,6 +17,8 @@ import os
 
 from web3 import Web3
 
+from config import WALLET_FUNDER_ADDRESS as _PROXY_ADDRESS
+
 # Polygon contract addresses
 _USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 _CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
@@ -130,51 +132,52 @@ class Claimer:
             print(f"[claimer] is_condition_redeemable RPC error: {e}")
             return None
 
-    def claim_winnings(self, condition_id: str, index_sets: list[int]) -> str | None:
-        """
-        Redeem winning CTF shares held by the user's Polymarket proxy wallet.
+    def claim_winnings(
+        self,
+        condition_id: str,
+        expected_wcol: int,
+    ) -> str | None:
+        """Redeem winning positions via bundled CTF+wcol tx (neg-risk bypass path).
 
-        Encodes `CTF.redeemPositions(USDC, 0, conditionId, indexSets)` as
-        calldata and submits it via `ProxyWalletFactory.proxy([ProxyCall(...)])`.
-        The Factory resolves the caller's proxy wallet (CREATE2 derived from
-        msg.sender) and forwards the call.
+        For neg-risk markets, the NegRiskAdapter is often in a half-resolved state
+        that makes its redeemPositions revert. We bypass it by calling the CTF
+        directly with wcol as collateral (which is what the adapter does
+        internally), then unwrapping wcol to USDC. Both inner calls are bundled
+        into a single Factory.proxy tx.
 
         Args:
-            condition_id: Market condition ID (hex bytes32).
-            index_sets: [1] for YES tokens, [2] for NO tokens.
+            condition_id: CLOB conditionId (bytes32 hex).
+            expected_wcol: Raw uint256 wcol amount to unwrap. Equal to the proxy's
+                balance at the winning position id (for binary markets with
+                payoutDenominator=1).
 
         Returns:
             Transaction hash hex string, or None on failure.
         """
         try:
             cond_bytes = bytes.fromhex(condition_id.replace("0x", ""))
+            proxy_addr = self._w3.to_checksum_address(_PROXY_ADDRESS)
 
-            # 1. Encode the inner CTF.redeemPositions(...) calldata.
-            # Use _encode_transaction_data() which is stable across web3.py v6/v7.
-            inner_fn = self._ctf.functions.redeemPositions(
-                self._w3.to_checksum_address(_USDC_ADDRESS),
-                b"\x00" * 32,   # parentCollectionId = bytes32(0)
+            redeem_hex = self._ctf.functions.redeemPositions(
+                self._w3.to_checksum_address(_WCOL_ADDRESS),
+                b"\x00" * 32,
                 cond_bytes,
-                index_sets,
-            )
-            inner_hex = inner_fn._encode_transaction_data()
-            inner_bytes = bytes.fromhex(inner_hex[2:] if inner_hex.startswith("0x") else inner_hex)
+                [1, 2],
+            )._encode_transaction_data()
+            redeem_inner = bytes.fromhex(redeem_hex[2:] if redeem_hex.startswith("0x") else redeem_hex)
 
-            # 2. Wrap as a ProxyCall directed at the CTF contract
-            proxy_call = (
-                _CALL_TYPE_CALL,
-                self._w3.to_checksum_address(_CTF_ADDRESS),
-                0,
-                inner_bytes,
-            )
+            unwrap_hex = self._wcol.functions.unwrap(
+                proxy_addr, int(expected_wcol),
+            )._encode_transaction_data()
+            unwrap_inner = bytes.fromhex(unwrap_hex[2:] if unwrap_hex.startswith("0x") else unwrap_hex)
 
-            # 3. Build the outer Factory.proxy([call]) transaction.
-            # Use "pending" nonce tag so back-to-back claims (multiple resolved
-            # trades in one cycle) get distinct, incrementing nonces instead of
-            # colliding on the confirmed-count value (which triggers RPC
-            # "replacement transaction underpriced" rejections).
+            calls = [
+                (_CALL_TYPE_CALL, self._w3.to_checksum_address(_CTF_ADDRESS),  0, redeem_inner),
+                (_CALL_TYPE_CALL, self._w3.to_checksum_address(_WCOL_ADDRESS), 0, unwrap_inner),
+            ]
+
             nonce = self._w3.eth.get_transaction_count(self._address, "pending")
-            tx = self._factory.functions.proxy([proxy_call]).build_transaction({
+            tx = self._factory.functions.proxy(calls).build_transaction({
                 "chainId": _CHAIN_ID,
                 "from": self._address,
                 "nonce": nonce,

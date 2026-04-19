@@ -51,33 +51,51 @@ def test_get_matic_balance(MockWeb3, mock_web3):
 
 
 @patch("chain.claimer.Web3")
-def test_claim_winnings_builds_and_sends_tx(MockWeb3, mock_web3):
+def test_claim_winnings_bundles_redeem_and_unwrap(MockWeb3, mock_web3):
     MockWeb3.return_value = mock_web3
     MockWeb3.HTTPProvider = MagicMock()
 
-    # Mock contract
-    mock_contract = MagicMock()
-    mock_fn = MagicMock()
-    mock_fn.build_transaction.return_value = {
-        "chainId": 137, "from": "0xwallet", "nonce": 42, "gas": 200000,
+    mock_ctf = MagicMock()
+    mock_redeem_fn = MagicMock()
+    mock_redeem_fn._encode_transaction_data.return_value = "0xaaaa"
+    mock_ctf.functions.redeemPositions.return_value = mock_redeem_fn
+
+    mock_wcol = MagicMock()
+    mock_unwrap_fn = MagicMock()
+    mock_unwrap_fn._encode_transaction_data.return_value = "0xbbbb"
+    mock_wcol.functions.unwrap.return_value = mock_unwrap_fn
+
+    mock_factory = MagicMock()
+    mock_factory.functions.proxy.return_value.build_transaction.return_value = {
+        "chainId": 137, "nonce": 1,
     }
-    mock_contract.functions.redeemPositions.return_value = mock_fn
-    mock_web3.eth.contract.return_value = mock_contract
 
-    # Mock signing + sending
-    mock_web3.eth.account.from_key.return_value = MagicMock(address="0xwallet")
-    mock_signed = MagicMock()
-    mock_web3.eth.account.sign_transaction.return_value = mock_signed
-    mock_web3.eth.send_raw_transaction.return_value = b"\xab" * 32
+    mock_web3.eth.contract.side_effect = [mock_ctf, mock_wcol, mock_factory]
+    mock_web3.eth.account.from_key.return_value = MagicMock(address="0xw", key=b"k")
+    mock_web3.eth.account.sign_transaction.return_value = MagicMock()
+    mock_web3.eth.send_raw_transaction.return_value = b"\xaa" * 32
 
-    from chain.claimer import Claimer
+    from chain.claimer import Claimer, _WCOL_ADDRESS
     c = Claimer(rpc_url="https://polygon-rpc.com", private_key="0x" + "ab" * 32)
-    tx_hash = c.claim_winnings(
-        condition_id="0x" + "ab" * 32,
-        index_sets=[1],
+    tx = c.claim_winnings(
+        condition_id="0x" + "cd" * 32,
+        expected_wcol=23_535_813,
     )
-    assert tx_hash is not None
-    mock_contract.functions.redeemPositions.assert_called_once()
+    assert tx is not None
+
+    # CTF.redeemPositions(wcol, 0x0, cond, [1,2])
+    redeem_args = mock_ctf.functions.redeemPositions.call_args[0]
+    assert redeem_args[0].lower() == _WCOL_ADDRESS.lower()
+    assert redeem_args[1] == b"\x00" * 32
+    assert redeem_args[3] == [1, 2]
+
+    # wcol.unwrap(proxy, 23_535_813)
+    unwrap_args = mock_wcol.functions.unwrap.call_args[0]
+    assert unwrap_args[1] == 23_535_813
+
+    # Factory.proxy called with TWO inner calls
+    calls = mock_factory.functions.proxy.call_args[0][0]
+    assert len(calls) == 2
 
 
 @patch("chain.claimer.Web3")
