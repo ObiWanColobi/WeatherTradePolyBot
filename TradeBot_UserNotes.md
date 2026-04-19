@@ -10,12 +10,6 @@ cswap --switch
 cswap --switch-to colby.pearson55@gmail.com
 cswap --switch-to dabombsquad55@gmail.com
 
-Cloud Git Update Commands (BASH)
-    cd ~/WeatherTradePolyBot
-    bash deploy.sh
-
-    If a file needs to be overwritten:
-         git checkout -- config.py && git pull origin main
 
 # Powershell Prompts
 ssh root@103.240.146.244
