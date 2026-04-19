@@ -116,6 +116,20 @@ class Claimer:
             print(f"[claimer] is_condition_resolved RPC error: {e}")
             return None
 
+    def is_condition_redeemable(self, condition_id: str) -> bool | None:
+        """Return True if CTF has resolved this condition (payoutDenominator > 0).
+
+        For neg-risk weather markets this is sufficient — we're redeeming against
+        the CTF directly with wcol as collateral, bypassing the adapter.
+        """
+        try:
+            cond_bytes = bytes.fromhex(condition_id.replace("0x", ""))
+            denom = self._ctf.functions.payoutDenominator(cond_bytes).call()
+            return denom > 0
+        except Exception as e:
+            print(f"[claimer] is_condition_redeemable RPC error: {e}")
+            return None
+
     def claim_winnings(self, condition_id: str, index_sets: list[int]) -> str | None:
         """
         Redeem winning CTF shares held by the user's Polymarket proxy wallet.

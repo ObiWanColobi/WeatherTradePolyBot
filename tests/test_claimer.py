@@ -145,3 +145,29 @@ def test_get_token_balance_queries_ctf(MockWeb3, mock_web3):
         token_id=12345,
     )
     assert bal == 23_535_813
+
+
+@patch("chain.claimer.Web3")
+def test_is_condition_redeemable_true(MockWeb3, mock_web3):
+    MockWeb3.return_value = mock_web3
+    MockWeb3.HTTPProvider = MagicMock()
+    mock_ctf = MagicMock()
+    mock_ctf.functions.payoutDenominator.return_value.call.return_value = 1
+    mock_web3.eth.contract.side_effect = [mock_ctf, MagicMock(), MagicMock()]
+
+    from chain.claimer import Claimer
+    c = Claimer(rpc_url="https://polygon-rpc.com", private_key="0x" + "ab" * 32)
+    assert c.is_condition_redeemable("0x" + "cd" * 32) is True
+
+
+@patch("chain.claimer.Web3")
+def test_is_condition_redeemable_unresolved(MockWeb3, mock_web3):
+    MockWeb3.return_value = mock_web3
+    MockWeb3.HTTPProvider = MagicMock()
+    mock_ctf = MagicMock()
+    mock_ctf.functions.payoutDenominator.return_value.call.return_value = 0
+    mock_web3.eth.contract.side_effect = [mock_ctf, MagicMock(), MagicMock()]
+
+    from chain.claimer import Claimer
+    c = Claimer(rpc_url="https://polygon-rpc.com", private_key="0x" + "ab" * 32)
+    assert c.is_condition_redeemable("0x" + "cd" * 32) is False
