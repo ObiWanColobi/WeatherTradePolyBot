@@ -127,3 +127,21 @@ def test_claimer_init_loads_wcol(MockWeb3, mock_web3):
     c = Claimer(rpc_url="https://polygon-rpc.com", private_key="0x" + "ab" * 32)
     assert _WCOL_ADDRESS.lower() == "0x3a3bd7bb9528e159577f7c2e685cc81a765002e2"
     assert c._wcol is not None
+
+
+@patch("chain.claimer.Web3")
+def test_get_token_balance_queries_ctf(MockWeb3, mock_web3):
+    MockWeb3.return_value = mock_web3
+    MockWeb3.HTTPProvider = MagicMock()
+    mock_ctf = MagicMock()
+    mock_ctf.functions.balanceOf.return_value.call.return_value = 23_535_813
+    # ctf, wcol, factory — three contracts loaded in order
+    mock_web3.eth.contract.side_effect = [mock_ctf, MagicMock(), MagicMock()]
+
+    from chain.claimer import Claimer
+    c = Claimer(rpc_url="https://polygon-rpc.com", private_key="0x" + "ab" * 32)
+    bal = c.get_token_balance(
+        proxy_address="0x0E5CaC0fc03f5728ddFb3b0B5BeE0cC0Ec67c55d",
+        token_id=12345,
+    )
+    assert bal == 23_535_813

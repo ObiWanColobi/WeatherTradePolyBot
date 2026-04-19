@@ -84,6 +84,16 @@ class Claimer:
         wei = self._w3.eth.get_balance(self._address)
         return wei / 1e18
 
+    def get_token_balance(self, proxy_address: str, token_id: int) -> int:
+        """Raw uint256 CTF ERC-1155 balance of proxy at token_id. 0 on RPC error."""
+        try:
+            return self._ctf.functions.balanceOf(
+                self._w3.to_checksum_address(proxy_address), int(token_id),
+            ).call()
+        except Exception as e:
+            print(f"[claimer] get_token_balance error: {e}")
+            return 0
+
     def is_condition_resolved(self, condition_id: str) -> bool | None:
         """
         Return True if the UMA oracle has reported this condition on-chain.

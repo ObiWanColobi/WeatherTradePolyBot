@@ -39,5 +39,32 @@
         "payable": false,
         "stateMutability": "view",
         "type": "function"
+    },
+    {
+        "constant": true,
+        "inputs": [
+            {"name": "account", "type": "address"},
+            {"name": "id", "type": "uint256"}
+        ],
+        "name": "balanceOf",
+        "outputs": [
+            {"name": "", "type": "uint256"}
+        ],
+        "payable": false,
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true,  "name": "redeemer",           "type": "address"},
+            {"indexed": true,  "name": "collateralToken",    "type": "address"},
+            {"indexed": true,  "name": "parentCollectionId", "type": "bytes32"},
+            {"indexed": false, "name": "conditionId",        "type": "bytes32"},
+            {"indexed": false, "name": "indexSets",          "type": "uint256[]"},
+            {"indexed": false, "name": "payout",             "type": "uint256"}
+        ],
+        "name": "PayoutRedemption",
+        "type": "event"
     }
 ]
