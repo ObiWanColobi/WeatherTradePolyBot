@@ -50,7 +50,7 @@ WEATHER = {
     # Top N markets the bot will actually evaluate for trades.
     # All others are ignored by estimate() to avoid wasting API calls.
     # Candidates are ranked by 24h volume and refreshed on each WeatherLayer.refresh() call.
-    "top_n_markets":             30,
+    "top_n_markets":             50,
 
     # ╔═══════════════════════════════════════════════════════════════════════════╗
     # ║  BOT LOOP & CACHING                                                     ║
