@@ -136,8 +136,12 @@ class Claimer:
                 inner_bytes,
             )
 
-            # 3. Build the outer Factory.proxy([call]) transaction
-            nonce = self._w3.eth.get_transaction_count(self._address)
+            # 3. Build the outer Factory.proxy([call]) transaction.
+            # Use "pending" nonce tag so back-to-back claims (multiple resolved
+            # trades in one cycle) get distinct, incrementing nonces instead of
+            # colliding on the confirmed-count value (which triggers RPC
+            # "replacement transaction underpriced" rejections).
+            nonce = self._w3.eth.get_transaction_count(self._address, "pending")
             tx = self._factory.functions.proxy([proxy_call]).build_transaction({
                 "chainId": _CHAIN_ID,
                 "from": self._address,

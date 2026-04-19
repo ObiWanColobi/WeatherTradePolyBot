@@ -1532,6 +1532,37 @@ class LiveExecutor(BaseExecutor):
                       f"(RPC error) — will retry next cycle")
                 continue
 
+            # If a prior cycle already submitted a tx for this trade that
+            # stayed pending (mempool delay), re-check it instead of submitting
+            # another. Resubmitting at the same nonce causes "replacement
+            # transaction underpriced" and burns a retry slot.
+            existing_tx = trade.get("claim_tx_hash")
+            if existing_tx:
+                existing_status = self._claimer.check_tx_status(existing_tx)
+                if existing_status == "pending":
+                    print(f"[claims] Prior tx still pending for trade #{trade['id']}  "
+                          f"tx={existing_tx[:16]}... — skipping resubmit")
+                    continue
+                if existing_status == "confirmed":
+                    proceeds = trade["shares"] * 1.0
+                    db.update_balance(proceeds)
+                    db.update_trade(trade["id"], {
+                        "status": "closed",
+                        "closed_at": now.isoformat(),
+                        "claim_status": "claim_confirmed",
+                    })
+                    db.record_account_value()
+                    notify("info", "Claim Completed",
+                           f"Redeemed {trade.get('market_name', 'unknown')[:60]}",
+                           fields={"Amount": f"${proceeds:.2f}",
+                                    "Market": trade.get("market_name", "")[:60]},
+                           color=COLOR_GREEN)
+                    print(f"[claims] CONFIRMED (prior tx) — trade #{trade['id']}  "
+                          f"+${proceeds:.2f}  tx={existing_tx[:16]}...")
+                    continue
+                # "failed" → fall through; clear tx_hash so next submit is fresh
+                db.update_trade(trade["id"], {"claim_tx_hash": None})
+
             print(f"[claims] Attempting claim for trade #{trade['id']}  "
                   f"{trade['market_name'][:40]}...")
 
