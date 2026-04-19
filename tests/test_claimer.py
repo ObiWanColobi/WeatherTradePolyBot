@@ -98,17 +98,59 @@ def test_claim_winnings_bundles_redeem_and_unwrap(MockWeb3, mock_web3):
     assert len(calls) == 2
 
 
+def _make_receipt(status, logs):
+    return {"status": status, "logs": logs}
+
+
 @patch("chain.claimer.Web3")
-def test_check_tx_status_confirmed(MockWeb3, mock_web3):
+def test_check_tx_status_confirmed_when_both_events_present(MockWeb3, mock_web3):
     MockWeb3.return_value = mock_web3
     MockWeb3.HTTPProvider = MagicMock()
-    mock_web3.eth.get_transaction_receipt.return_value = {"status": 1}
-    mock_web3.eth.account.from_key.return_value = MagicMock(address="0xwallet")
+
+    ctf_log = {"address": "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",
+               "topics": ["0x" + "aa" * 32], "data": "0x"}
+    mock_web3.eth.get_transaction_receipt.return_value = _make_receipt(1, [ctf_log])
+
+    mock_ctf = MagicMock()
+    mock_ctf_event = MagicMock()
+    mock_ctf_event.process_log.return_value = {"args": {"payout": 23_535_813}}
+    mock_ctf.events.PayoutRedemption.return_value = mock_ctf_event
+    mock_web3.eth.contract.side_effect = [mock_ctf, MagicMock(), MagicMock()]
 
     from chain.claimer import Claimer
     c = Claimer(rpc_url="https://polygon-rpc.com", private_key="0x" + "ab" * 32)
-    status = c.check_tx_status("0x" + "ab" * 32)
-    assert status == "confirmed"
+    assert c.check_tx_status("0x" + "aa" * 32) == "confirmed"
+
+
+@patch("chain.claimer.Web3")
+def test_check_tx_status_status1_no_events_is_failed(MockWeb3, mock_web3):
+    """Phantom pattern: receipt status=1 but no PayoutRedemption -> 'failed'."""
+    MockWeb3.return_value = mock_web3
+    MockWeb3.HTTPProvider = MagicMock()
+    mock_web3.eth.get_transaction_receipt.return_value = _make_receipt(1, [])
+    mock_web3.eth.contract.side_effect = [MagicMock(), MagicMock(), MagicMock()]
+
+    from chain.claimer import Claimer
+    c = Claimer(rpc_url="https://polygon-rpc.com", private_key="0x" + "ab" * 32)
+    assert c.check_tx_status("0x" + "aa" * 32) == "failed"
+
+
+@patch("chain.claimer.Web3")
+def test_check_tx_status_payout_zero_is_failed(MockWeb3, mock_web3):
+    MockWeb3.return_value = mock_web3
+    MockWeb3.HTTPProvider = MagicMock()
+    ctf_log = {"address": "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",
+               "topics": ["0x" + "aa" * 32], "data": "0x"}
+    mock_web3.eth.get_transaction_receipt.return_value = _make_receipt(1, [ctf_log])
+    mock_ctf = MagicMock()
+    mock_ctf_event = MagicMock()
+    mock_ctf_event.process_log.return_value = {"args": {"payout": 0}}
+    mock_ctf.events.PayoutRedemption.return_value = mock_ctf_event
+    mock_web3.eth.contract.side_effect = [mock_ctf, MagicMock(), MagicMock()]
+
+    from chain.claimer import Claimer
+    c = Claimer(rpc_url="https://polygon-rpc.com", private_key="0x" + "ab" * 32)
+    assert c.check_tx_status("0x" + "aa" * 32) == "failed"
 
 
 @patch("chain.claimer.Web3")

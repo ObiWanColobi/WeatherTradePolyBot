@@ -193,18 +193,35 @@ class Claimer:
             return None
 
     def check_tx_status(self, tx_hash: str) -> str:
-        """
-        Check transaction receipt status.
+        """Check receipt AND require a CTF.PayoutRedemption event with payout>0.
 
-        Returns:
-            "confirmed" — tx mined and succeeded (status=1)
-            "failed"    — tx mined but reverted (status=0)
-            "pending"   — no receipt yet
+        Rationale: the old version returned 'confirmed' on any status=1 receipt.
+        That let phantom redemptions (status=1, payout=0, no USDC movement) get
+        marked claim_confirmed in the DB. This version parses logs — if no
+        PayoutRedemption event from CTF with payout>0 is present, the tx is
+        treated as failed so the retry path kicks in.
         """
         try:
             receipt = self._w3.eth.get_transaction_receipt(tx_hash)
             if receipt is None:
                 return "pending"
-            return "confirmed" if receipt["status"] == 1 else "failed"
+            if receipt["status"] != 1:
+                return "failed"
+
+            ctf_addr = self._w3.to_checksum_address(_CTF_ADDRESS).lower()
+            event = self._ctf.events.PayoutRedemption()
+            for log in receipt.get("logs", []):
+                if log["address"].lower() != ctf_addr:
+                    continue
+                try:
+                    parsed = event.process_log(log)
+                except Exception:
+                    continue
+                if parsed["args"]["payout"] > 0:
+                    return "confirmed"
+
+            print(f"[claimer] tx {tx_hash[:16]}... status=1 but no CTF.PayoutRedemption "
+                  f"payout>0 — treating as failed (phantom)")
+            return "failed"
         except Exception:
             return "pending"
