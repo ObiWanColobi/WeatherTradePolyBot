@@ -495,12 +495,10 @@ def run(dry_run: bool = False):
     _risk_manager = RiskManager()
     _risk_manager.startup_cleanup()
 
-    # Apply live-mode config overrides
+    # Apply live-mode config overrides (centralized in config.py)
+    from config import apply_live_overrides
+    apply_live_overrides()
     if TRADING_MODE == "live":
-        WEATHER["kelly_max_bet_usdc"] = WEATHER.get("live_kelly_max_bet_usdc", 25.0)
-        WEATHER["kelly_max_bet_usdc_unanimous"] = WEATHER.get("live_kelly_max_bet_usdc_unanimous", 10.0)
-        WEATHER["risk_daily_loss_limit_pct"] = WEATHER.get("live_risk_daily_loss_limit_pct", 0.05)
-        WEATHER["risk_auto_reset"] = WEATHER.get("live_risk_auto_reset", False)
         print("[bot] Live mode — skipping session reset prompt.")
     else:
         _prompt_startup()

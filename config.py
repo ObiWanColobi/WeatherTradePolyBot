@@ -239,3 +239,31 @@ OPEN_METEO_ARCHIVE_API  = "https://archive-api.open-meteo.com/v1/archive"
 
 # ── Database ──────────────────────────────────────────────────────────────────
 DB_PATH = "weather_bot.db"
+
+
+# ── Live-Mode Override Application ────────────────────────────────────────────
+# Maps paper key → live override key. Any process that needs the resolved
+# (mode-aware) values should call apply_live_overrides() once at startup.
+_LIVE_OVERRIDES = {
+    "kelly_max_bet_usdc":           "live_kelly_max_bet_usdc",
+    "kelly_max_bet_usdc_unanimous": "live_kelly_max_bet_usdc_unanimous",
+    "risk_daily_loss_limit_pct":    "live_risk_daily_loss_limit_pct",
+    "risk_auto_reset":              "live_risk_auto_reset",
+}
+
+_overrides_applied = False
+
+def apply_live_overrides() -> bool:
+    """Mutate WEATHER in place with live_* overrides when TRADING_MODE == 'live'.
+
+    Idempotent — safe to call from multiple modules. Returns True if applied.
+    """
+    global _overrides_applied
+    if _overrides_applied or TRADING_MODE != "live":
+        _overrides_applied = True
+        return False
+    for paper_key, live_key in _LIVE_OVERRIDES.items():
+        if live_key in WEATHER:
+            WEATHER[paper_key] = WEATHER[live_key]
+    _overrides_applied = True
+    return True

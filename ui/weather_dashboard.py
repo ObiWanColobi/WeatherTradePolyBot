@@ -22,7 +22,9 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import db
-from config import WEATHER, PAPER_STARTING_BALANCE, LIVE_STARTING_BALANCE, TRADING_MODE
+from config import WEATHER, PAPER_STARTING_BALANCE, LIVE_STARTING_BALANCE, TRADING_MODE, apply_live_overrides
+
+apply_live_overrides()
 from weather_risk import RiskManager
 from executor import create_executor
 from notifications import notify
@@ -136,23 +138,31 @@ stats         = db.get_stats()
 
 with st.sidebar:
     st.title("🌤️ Weather Bot")
-    st.markdown("**Mode:** 🟡 PAPER TRADING")
+    if TRADING_MODE == "live":
+        st.markdown("**Mode:** 🔴 LIVE TRADING")
+    else:
+        st.markdown("**Mode:** 🟡 PAPER TRADING")
     st.divider()
 
     st.subheader("Config")
-    st.caption(f"Max bet:          ${WEATHER.get('kelly_max_bet_usdc', 50):.0f} USDC")
-    st.caption(f"Max positions:    {WEATHER.get('decision_max_open_positions', 5)}")
-    st.caption(f"Max exposure:     {WEATHER.get('decision_max_exposure_pct', 0.30):.0%}")
-    st.caption(f"Min edge (entry): {WEATHER.get('entry_min_edge_pct', 0.10):.0%}")
-    st.caption(f"Conviction gate:  {WEATHER.get('entry_min_ensemble_conviction', 0.70):.0%}")
-    st.caption(f"Kelly fraction:   {WEATHER.get('kelly_fraction', 0.50):.0%}")
+    st.caption(f"Max bet:          ${WEATHER['kelly_max_bet_usdc']:.0f} USDC")
+    st.caption(f"Max positions:    {WEATHER['decision_max_open_positions']}")
+    st.caption(f"Max exposure:     {WEATHER['decision_max_exposure_pct']:.0%}")
+    st.caption(f"Min edge (entry): {WEATHER['entry_min_edge_pct']:.0%}")
+    st.caption(f"Conviction gate:  {WEATHER['entry_min_ensemble_conviction']:.0%}")
+    st.caption(f"Kelly fraction:   {WEATHER['kelly_fraction']:.0%}")
+    st.caption(f"Entry cutoff:     >{WEATHER['entry_min_hours_to_close']:.0f}h to close")
 
     st.divider()
 
     st.subheader("Exit Triggers")
-    st.caption(f"Ensemble flip:    >{WEATHER.get('exit_ensemble_flip_threshold', 0.25):.0%} shift")
-    st.caption(f"Adverse move:     >{WEATHER.get('exit_adverse_price_move_pct', 0.30):.0%} of fill")
-    st.caption(f"Hold window:      <{WEATHER.get('exit_no_exit_hours_to_close', 2.0):.0f}h to close")
+    st.caption(f"Ensemble flip:    >{WEATHER['exit_ensemble_flip_threshold']:.0%} shift")
+    st.caption(f"Adverse move:     >{WEATHER['exit_adverse_price_move_pct']:.0%} of fill")
+    st.caption(
+        f"Late-game:        <{WEATHER['exit_late_game_hours']:.0f}h left, "
+        f"mkt<{WEATHER['exit_late_game_market_floor']:.0%}, "
+        f"ens≥{WEATHER['exit_late_game_ensemble_threshold']:.0%}"
+    )
 
     st.divider()
 
@@ -160,7 +170,7 @@ with st.sidebar:
     st.subheader("Risk Status")
     loss_count, loss_total = db.get_today_realized_losses()
     st.caption(f"Losses today: {loss_count} trades, ${loss_total:.2f}")
-    st.caption(f"Loss limit: {WEATHER.get('risk_daily_loss_limit_pct', 0.15):.0%} of account")
+    st.caption(f"Loss limit: {WEATHER['risk_daily_loss_limit_pct']:.0%} of account")
     if TRADING_MODE == "live":
         st.warning("🔴 LIVE mode — closes execute real CLOB orders")
     else:
@@ -377,19 +387,28 @@ if _notif_rows:
 
 # ── Top metrics ───────────────────────────────────────────────────────────────
 
-c1, c2, c3, c4, c5, c6 = st.columns(6)
+_max_exposure_pct = WEATHER.get("decision_max_exposure_pct", 0.80)
+_exposure_cap = account_value * _max_exposure_pct
+_capital_available = max(0.0, min(cash, _exposure_cap - position_val))
+
+c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
 with c1:
-    st.metric("Account Value", f"${account_value:,.2f}", delta=f"{acct_pnl_pct:+.1f}%")
+    st.metric("Account Balance", f"${account_value:,.2f}", delta=f"{acct_pnl_pct:+.1f}%")
 with c2:
-    st.metric("Realized P&L", f"${realized_pnl:+.2f}", delta=f"{realized_pct:+.1f}%")
+    st.metric("Trading Capital (Floor)", f"${_capital_available:,.2f}",
+              delta=f"cap {_max_exposure_pct:.0%} exp", delta_color="off")
 with c3:
-    st.metric("Unrealized P&L", f"${unrealized:+.2f}")
+    st.metric("Untraded Balance", f"${cash:,.2f}")
 with c4:
+    st.metric("Realized P&L", f"${realized_pnl:+.2f}", delta=f"{realized_pct:+.1f}%")
+with c5:
+    st.metric("Unrealized P&L", f"${unrealized:+.2f}")
+with c6:
     st.metric("Win Rate", f"{stats['win_rate']:.1f}%",
               delta=f"{stats['wins']}W / {stats['losses']}L", delta_color="off")
-with c5:
+with c7:
     st.metric("Open Positions", len(open_trades))
-with c6:
+with c8:
     st.metric("Trades Today", trades_today)
 
 st.divider()
