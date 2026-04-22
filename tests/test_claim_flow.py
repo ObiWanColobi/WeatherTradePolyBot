@@ -275,6 +275,79 @@ def test_get_open_trades_excludes_claim_pending():
         conn.execute("DELETE FROM trades WHERE market_id = 'test-claim-exclude'")
 
 
+# ── Sibling-redemption sweep ───────────────────────────────────────────────
+
+
+@patch("executor.live.db")
+def test_sibling_redemption_closes_stuck_pending(mock_db):
+    """Same-token neg-risk extended positions: first leg's claim redeems the
+    wallet's full balance; second leg then finds $0 on-chain. Sweep should
+    close the second leg referencing the sibling's tx, WITHOUT re-crediting
+    balance (sibling's claim already credited the combined amount)."""
+    from executor.live import LiveExecutor
+
+    mock_claimer = MagicMock()
+    mock_claimer.get_matic_balance.return_value = 1.0
+    ex = LiveExecutor.__new__(LiveExecutor)
+    ex._client = MagicMock()
+    ex._claimer = mock_claimer
+    ex._oracle_alerted = set()
+
+    stuck = {
+        "id": 17, "token_id": "tok-shared-123", "city": "toronto",
+        "market_name": "Toronto <=15C",
+        "shares": 10.88, "status": "claim_pending",
+        "claim_status": "claim_no_balance",
+    }
+    sibling = {
+        "id": 23, "token_id": "tok-shared-123",
+        "claim_status": "claim_confirmed",
+        "claim_tx_hash": "0xsiblingtx",
+    }
+    mock_db.get_stuck_claim_pending_trades.return_value = [stuck]
+    mock_db.find_confirmed_sibling.return_value = sibling
+    mock_db.get_pending_claims.return_value = []
+
+    ex.process_pending_claims()
+
+    mock_db.update_trade.assert_called_once()
+    args, _ = mock_db.update_trade.call_args
+    assert args[0] == 17
+    update = args[1]
+    assert update["status"] == "closed"
+    assert update["claim_status"] == "claim_via_sibling"
+    assert update["claim_tx_hash"] == "0xsiblingtx"
+    # Crucial: sibling's claim already credited balance — must NOT re-credit
+    mock_db.update_balance.assert_not_called()
+
+
+@patch("executor.live.db")
+def test_sibling_sweep_skips_when_no_confirmed_sibling(mock_db):
+    """If no sibling has claim_confirmed, sweep leaves the trade untouched."""
+    from executor.live import LiveExecutor
+
+    ex = LiveExecutor.__new__(LiveExecutor)
+    ex._client = MagicMock()
+    ex._claimer = MagicMock()
+    ex._claimer.get_matic_balance.return_value = 1.0
+    ex._oracle_alerted = set()
+
+    stuck = {
+        "id": 42, "token_id": "tok-solo-999", "city": "paris",
+        "market_name": "Paris >=20C",
+        "shares": 15.0, "status": "claim_pending",
+        "claim_status": "claim_pending",
+    }
+    mock_db.get_stuck_claim_pending_trades.return_value = [stuck]
+    mock_db.find_confirmed_sibling.return_value = None
+    mock_db.get_pending_claims.return_value = []
+
+    ex.process_pending_claims()
+
+    mock_db.update_trade.assert_not_called()
+    mock_db.update_balance.assert_not_called()
+
+
 def test_record_account_value_includes_claim_pending():
     """Account value should include claim_pending positions."""
     import db

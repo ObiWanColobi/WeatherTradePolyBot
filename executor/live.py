@@ -1418,6 +1418,44 @@ class LiveExecutor(BaseExecutor):
 
     # ── On-chain claim processing ──────────────────────────────────────────
 
+    def _close_via_sibling(self, trade: dict, sibling: dict, now: datetime) -> None:
+        """Close a trade whose shares were redeemed as part of a sibling's claim tx.
+        Does NOT credit balance — the sibling's claim already credited the full
+        combined on-chain token balance (see claim path: balance_raw / 1e6).
+        Same-token neg-risk extended positions share a token_id across legs."""
+        sibling_tx = sibling.get("claim_tx_hash")
+        db.update_trade(trade["id"], {
+            "status": "closed",
+            "closed_at": now.isoformat(),
+            "claim_status": "claim_via_sibling",
+            "claim_tx_hash": sibling_tx,
+            "claim_last_attempt": now.isoformat(),
+        })
+        db.record_account_value()
+        tx_short = (sibling_tx[:16] + "...") if sibling_tx else "none"
+        notify("info", "Claim Resolved via Sibling",
+               f"Trade #{trade['id']} ({trade.get('city', '?')}) redeemed via "
+               f"sibling #{sibling['id']}",
+               fields={"Market": (trade.get("market_name") or "")[:60],
+                       "Sibling tx": tx_short},
+               color=COLOR_GREEN)
+        print(f"[claims] VIA-SIBLING — trade #{trade['id']} closed "
+              f"(sibling #{sibling['id']} tx={tx_short})")
+
+    def _sweep_sibling_redeemed(self) -> None:
+        """Close any claim_pending trades whose token_id already has a confirmed
+        sibling claim. Self-heals same-token neg-risk positions where the second
+        claim attempt found $0 on-chain because the sibling's claim redeemed the
+        full combined balance."""
+        now = datetime.now(timezone.utc)
+        for trade in db.get_stuck_claim_pending_trades():
+            token_id = trade.get("token_id")
+            if not token_id:
+                continue
+            sibling = db.find_confirmed_sibling(str(token_id), trade["id"])
+            if sibling:
+                self._close_via_sibling(trade, sibling, now)
+
     def process_pending_claims(self):
         """
         Process on-chain claims for resolved winning trades.
@@ -1425,6 +1463,11 @@ class LiveExecutor(BaseExecutor):
         Checks all trades with claim_status='claim_pending', respects backoff
         schedule, submits CTF redeemPositions(), and credits balance on confirmation.
         """
+        # Pre-sweep: close any claim_pending trades whose sibling already redeemed
+        # on-chain. Handles same-token neg-risk extended positions where the
+        # sibling's claim tx redeemed the wallet's full token balance.
+        self._sweep_sibling_redeemed()
+
         pending = db.get_pending_claims()
         if not pending:
             return
@@ -1568,6 +1611,10 @@ class LiveExecutor(BaseExecutor):
                 proxy_address=WALLET_FUNDER_ADDRESS, token_id=int(token_id),
             )
             if balance_raw == 0:
+                sibling = db.find_confirmed_sibling(str(token_id), trade["id"])
+                if sibling:
+                    self._close_via_sibling(trade, sibling, now)
+                    continue
                 print(f"[claims] Trade #{trade['id']} has 0 balance at token_id — "
                       f"marking as already redeemed elsewhere, skipping")
                 db.update_trade(trade["id"], {

@@ -425,6 +425,32 @@ def get_pending_claims() -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def get_stuck_claim_pending_trades() -> list[dict]:
+    """Return all trades still in status='claim_pending', regardless of claim_status.
+    Used by the sibling-redemption sweep to resolve trades whose on-chain shares
+    were already redeemed as part of a sibling's claim tx (same token_id)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM trades WHERE status = 'claim_pending' ORDER BY id ASC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def find_confirmed_sibling(token_id: str, exclude_trade_id: int) -> dict | None:
+    """Return a sibling trade (same token_id, different id) that has already been
+    redeemed on-chain (claim_status='claim_confirmed'). Neg-risk positions share a
+    token_id across extended-position legs; the first claim redeems the wallet's
+    full balance for that token, leaving $0 for later sibling claim attempts."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM trades WHERE token_id = ? AND id != ? "
+            "AND claim_status = 'claim_confirmed' "
+            "ORDER BY claim_last_attempt DESC LIMIT 1",
+            (token_id, exclude_trade_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+
 def get_open_position_count() -> int:
     with get_conn() as conn:
         row = conn.execute(
