@@ -1094,6 +1094,53 @@ class LiveExecutor(BaseExecutor):
         for leg in legs:
             self.close_full(leg, reason=reason)
 
+    def _reconcile_position_shares(self, legs: list[dict], token_id: str) -> float:
+        """
+        Reconcile DB-recorded leg shares against the on-chain ERC-1155 CTF balance
+        just before posting a sell. Prevents CLOB "not enough balance" rejects when
+        DB has drifted higher than actual claimable shares (partial-fill dust,
+        sibling-redeem remnants). Mirrors the JIT balance read at the claim path.
+        """
+        recorded = sum(leg.get("shares", 0) for leg in legs)
+        if self._claimer is None:
+            return recorded
+
+        try:
+            balance_raw = self._claimer.get_token_balance(
+                proxy_address=WALLET_FUNDER_ADDRESS, token_id=int(token_id),
+            )
+        except Exception as e:
+            print(f"[live] reconcile: balance read failed ({e}) — using DB shares {recorded:.4f}")
+            return recorded
+
+        on_chain = math.floor((balance_raw / 1e6) * 100) / 100
+
+        if on_chain >= recorded:
+            return recorded
+
+        name = legs[0].get("market_name", "unknown")[:55] if legs else "unknown"
+
+        if on_chain == 0:
+            print(f"[live] RECONCILE {name}  DB={recorded:.4f} → chain=0 — skipping exit "
+                  f"(RPC hiccup or already off-chain)")
+            return 0.0
+
+        scale = on_chain / recorded
+        for leg in legs:
+            new_shares = math.floor(leg.get("shares", 0) * scale * 10000) / 10000
+            db.update_trade(leg["id"], {"shares": new_shares})
+            leg["shares"] = new_shares
+
+        adjusted = sum(leg.get("shares", 0) for leg in legs)
+        print(f"[live] RECONCILE {name}  DB={recorded:.4f} → chain={on_chain:.4f} "
+              f"(adjusted legs sum={adjusted:.4f})")
+        notify("warning", "Position Reconciled",
+               f"Exit sizing reduced to match on-chain balance for {name}",
+               fields={"DB Shares": f"{recorded:.4f}",
+                        "On-Chain": f"{on_chain:.4f}",
+                        "Market": name})
+        return adjusted
+
     def initiate_exit(self, trade: dict, reason: str):
         """Post a GTC sell to begin exiting a position. Tracks order across cycles."""
         parent_id = trade.get("parent_trade_id") or trade["id"]
@@ -1106,7 +1153,7 @@ class LiveExecutor(BaseExecutor):
             print(f"[live] Cannot initiate exit — no token_id for {trade['market_name'][:50]}")
             return
 
-        total_shares = sum(leg.get("shares", 0) for leg in legs)
+        total_shares = self._reconcile_position_shares(legs, token_id)
         if total_shares <= 0:
             return
 

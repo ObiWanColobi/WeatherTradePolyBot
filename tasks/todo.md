@@ -72,7 +72,7 @@ Then push. User pulls on Kamatera.
 
 ---
 
-## 2026-04-22 — Exit share reconciliation (PLAN, not started — follow-up to above)
+## 2026-04-22 — Exit share reconciliation (CODE COMPLETE — follow-up to above)
 
 ### Problem
 Shanghai NO exit stuck in a CLOB-reject loop tripping the API circuit breaker
@@ -101,7 +101,7 @@ but at the exit-sizing layer instead of the claim layer.
 
 ### Plan
 
-- [ ] **Add `_reconcile_position_shares(legs, token_id) -> float`** in
+- [x] **Add `_reconcile_position_shares(legs, token_id) -> float`** in
       `executor/live.py`:
   - If `self._claimer is None` → return `sum(leg.shares)` (paper mode / no reconciliation possible).
   - Call `self._claimer.get_token_balance(proxy_address=WALLET_FUNDER_ADDRESS, token_id=int(token_id))`.
@@ -120,13 +120,13 @@ but at the exit-sizing layer instead of the claim layer.
         `feedback_discord_notifications`).
       - Return `on_chain`.
 
-- [ ] **Wire into `initiate_exit()`** at line 1109:
+- [x] **Wire into `initiate_exit()`** at line 1109:
   - Replace `total_shares = sum(leg.get("shares", 0) for leg in legs)` with
     `total_shares = self._reconcile_position_shares(legs, token_id)`.
   - Keep the existing `if total_shares <= 0: return` guard — now also catches
     the on-chain-zero case.
 
-- [ ] **No other changes to `_settle_exit`, `manage_pending_exit`, or partial
+- [x] **No other changes to `_settle_exit`, `manage_pending_exit`, or partial
       exits.** After reconciliation the DB is self-consistent, so downstream
       math (leg_share_frac at line 1158, account value at db.py:310-317) keeps
       working without touching those paths.
