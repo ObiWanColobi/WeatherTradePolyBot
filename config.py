@@ -17,7 +17,7 @@ WALLET_FUNDER_ADDRESS = os.getenv("WALLET_FUNDER_ADDRESS", "")
 
 # ── Paper Trading ─────────────────────────────────────────────────────────────
 PAPER_STARTING_BALANCE = 2000.00   # USDC
-LIVE_STARTING_BALANCE  = 200.00    # USDC — actual funded amount when live trading began
+LIVE_STARTING_BALANCE  = 4000.00    # USDC — actual funded amount when live trading began
 
 # ── Market Filters (used by Polymarket API fetcher) ───────────────────────────
 MIN_LIQUIDITY_USDC = 1000
@@ -78,8 +78,8 @@ WEATHER = {
     "entry_min_hours_to_close":      2.0,   # must have >=2h before resolution
     "entry_min_ensemble_margin_c":       3.0,   # ensemble mean must be >=3°C from threshold at minimum conviction (raised from 2.0 on 2026-04-07)
     "entry_min_ensemble_margin_c_floor": 1.5,   # margin floor for unanimous ensembles (0/69 or 69/69); scales linearly up to entry_min_ensemble_margin_c at min conviction
-    "entry_max_slippage_pct":        0.05,  # max simulated fill slippage as % of mid (5%)
-    "entry_min_net_edge_pct":        0.05,  # minimum edge remaining after slippage, any tier (5%)
+    "entry_max_slippage_pct":        0.03,  # max simulated fill slippage as % of mid (5%)
+    "entry_min_net_edge_pct":        0.06,  # minimum edge remaining after slippage, any tier (5%)
 
     # ── Unanimous weak-edge entry ─────────────────────────────────────────────
     # When ensemble conviction is >= this threshold (~67/69 members), the edge
@@ -128,27 +128,27 @@ WEATHER = {
     "kelly_fraction":                0.50,    # fractional Kelly multiplier (0.5 = half-Kelly)
     "kelly_max_bet_usdc":           15.00,   # PAPER: hard cap per trade in USDC
     "kelly_min_bet_usdc":             5.00,   # minimum bet size (below this = skip)
-    "kelly_max_balance_pct":          0.10,   # never risk more than 10% of balance per trade
+    "kelly_max_balance_pct":          0.02,   # never risk more than 10% of balance per trade
     "kelly_max_bet_usdc_unanimous":  50.00,   # PAPER: separate hard cap for unanimous-weak trades
 
     # ╔═══════════════════════════════════════════════════════════════════════════╗
     # ║  DECISION LAYER / PORTFOLIO LIMITS                                      ║
     # ║  Concentration and exposure caps across all open positions               ║
     # ╚═══════════════════════════════════════════════════════════════════════════╝
-    "decision_max_open_positions":          20,   # max concurrent open trades
-    "decision_max_exposure_pct":            .8,  # max total balance % at risk across all open trades
-    "decision_max_positions_per_city_date":  2,   # max positions per (city, resolution-date) — allows different thresholds, caps concentration
+    "decision_max_open_positions":          15,   # max concurrent open trades
+    "decision_max_exposure_pct":            .25,  # max total balance % at risk across all open trades
+    "decision_max_positions_per_city_date":  1,   # max positions per (city, resolution-date) — allows different thresholds, caps concentration
 
     # ╔═══════════════════════════════════════════════════════════════════════════╗
     # ║  EXTENDED POSITIONS (SCALE-IN)                                          ║
     # ║  Adding to winning positions over time                                  ║
     # ╚═══════════════════════════════════════════════════════════════════════════╝
     "extended_positions_enabled":                True,   # master toggle — False skips pass entirely
-    "extended_positions_max_add_ons":            2,      # max add-on legs (3 total with initial entry)
+    "extended_positions_max_add_ons":            1,      # max add-on legs (3 total with initial entry)
     "extended_positions_leg_spacing_hours":      12.0,   # time-to-close band spacing per leg
     "extended_positions_min_cooldown_hours":     12.0,   # minimum hours between any two legs
     "extended_positions_rejection_cooldown_hours": 1.0,  # cooldown after a rejected extend attempt (slippage/thin book)
-    "extended_positions_min_net_edge":           0.05,   # minimum edge after slippage cost to bother extending (5%)
+    "extended_positions_min_net_edge":           0.06,   # minimum edge after slippage cost to bother extending (5%)
 
     # ╔═══════════════════════════════════════════════════════════════════════════╗
     # ║  RISK MANAGEMENT                          [paper defaults, see Live     ║
@@ -162,9 +162,9 @@ WEATHER = {
     # ║  These REPLACE the paper defaults above when running with real money.   ║
     # ║  More conservative caps to limit downside while validating the system.  ║
     # ╚═══════════════════════════════════════════════════════════════════════════╝
-    "live_kelly_max_bet_usdc":           15.00,   # overrides kelly_max_bet_usdc ($15 vs $200 paper)
-    "live_kelly_max_bet_usdc_unanimous": 10.00,   # overrides kelly_max_bet_usdc_unanimous ($10 vs $50 paper)
-    "live_risk_daily_loss_limit_pct":     0.5,   # overrides risk_daily_loss_limit_pct (same for now, tighten as needed)
+    "live_kelly_max_bet_usdc":           50.00,   # overrides kelly_max_bet_usdc ($15 vs $200 paper)
+    "live_kelly_max_bet_usdc_unanimous": 75.00,   # overrides kelly_max_bet_usdc_unanimous ($10 vs $50 paper)
+    "live_risk_daily_loss_limit_pct":     0.10,   # overrides risk_daily_loss_limit_pct (same for now, tighten as needed)
     "live_risk_auto_reset":              True,   # overrides risk_auto_reset — (False = manual override only, no midnight reset)
 
     # ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -172,7 +172,7 @@ WEATHER = {
     # ║  Polygon transaction settings for redeeming winning positions           ║
     # ╚═══════════════════════════════════════════════════════════════════════════╝
     "claim_retry_backoff_minutes":  [5, 30, 120, 480, 1440],  # 5min, 30min, 2hr, 8hr, 24hr
-    "claim_min_matic_balance":      0.01,                       # defer claims if MATIC below this
+    "claim_min_matic_balance":      0.05,                       # defer claims if MATIC below this
     "polygon_rpc_url":              os.getenv("POLYGON_RPC_URL", "https://rpc.ankr.com/polygon"),
 
     # ╔═══════════════════════════════════════════════════════════════════════════╗
