@@ -265,22 +265,27 @@ def f_to_c(f: float) -> float:
 
 
 def find_forecast_day(forecast: list[dict], target_date: str, key: str):
-    """Find value for target_date; falls back to index 1 (tomorrow) then index 0."""
+    """Return value for target_date, or None if target_date is outside the forecast window.
+
+    Previously fell back to forecast[1] / forecast[0] when target_date was missing.
+    That silently returned wrong-date data once the target rolled out of Open-Meteo's
+    window (e.g. a market closing today read tomorrow's forecast in the market's tz),
+    triggering false exit signals. Callers must treat None as "no signal".
+    """
     for day in forecast:
         if day.get("date") == target_date:
             return day.get(key)
-    if len(forecast) > 1:
-        return forecast[1].get(key)
-    return forecast[0].get(key) if forecast else None
+    return None
 
 
 def find_ensemble_day(ensemble: list[dict], target_date: str) -> list[float] | None:
-    """Find ensemble member temps for target_date; falls back to tomorrow."""
+    """Return ensemble member temps for target_date, or None if outside the window.
+
+    See find_forecast_day for why no fallback — same silent wrong-date bug applies.
+    """
     for day in ensemble:
         if day.get("date") == target_date:
             return day.get("member_temps")
-    if len(ensemble) > 1:
-        return ensemble[1].get("member_temps")
     return None
 
 

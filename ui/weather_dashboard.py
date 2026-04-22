@@ -99,6 +99,41 @@ def _unreal_pnl(trade: dict) -> float:
     return (current - trade["fill_price"]) * trade["shares"]
 
 
+_ENS_STALE_SECONDS = 300  # last valid ensemble read older than this → (stale) tag
+
+
+def _ens_current_cell(trade: dict) -> str:
+    """Format the current-ensemble cell for a trade.
+
+    For OPEN trades: tags (stale) when the last valid ensemble read is missing
+    or older than _ENS_STALE_SECONDS — e.g. target date rolled out of the
+    Open-Meteo forecast window, so the stored count is no longer a live signal.
+
+    For CLOSED trades: the stored count is the ensemble at exit (a historical
+    snapshot), not a live signal — never tagged stale.
+    """
+    yes = trade.get("current_ensemble_yes")
+    n   = trade.get("current_ensemble_n")
+    if yes is None or not n:
+        return "—"
+    base = f"{int(yes)}/{int(n)}"
+
+    is_open = trade.get("status") == "open" and not trade.get("closed_at")
+    if not is_open:
+        return base
+
+    read_at = trade.get("current_ensemble_read_at")
+    if not read_at:
+        return f"{base} (stale)"
+    try:
+        ts = datetime.fromisoformat(read_at)
+        if (datetime.now(timezone.utc) - ts).total_seconds() > _ENS_STALE_SECONDS:
+            return f"{base} (stale)"
+    except (ValueError, TypeError):
+        return f"{base} (stale)"
+    return base
+
+
 def _parse_threshold(row: dict) -> str:
     """
     Return the threshold string (e.g. '>=19°C' or '<=57°F').
@@ -527,9 +562,7 @@ if open_trades:
         else:
             ens_str = "—"
         url = t.get("market_url") or ""
-        cur_yes = t.get("current_ensemble_yes")
-        cur_n   = t.get("current_ensemble_n")
-        cur_ens_str = f"{int(cur_yes)}/{int(cur_n)}" if cur_yes is not None and cur_n else "—"
+        cur_ens_str = _ens_current_cell(t)
 
         # _pid used to match parent rows to their leg sub-rows; dropped before display
         row = {
@@ -608,6 +641,12 @@ if open_trades:
         )
     st.dataframe(df_open, column_config=col_cfg, width='stretch', hide_index=True,
                  key=f"df_open_{st.session_state.get('op_table_reset', 0)}")
+    st.caption(
+        "Ens. Current tagged `(stale)` means the last valid ensemble read is "
+        f">{_ENS_STALE_SECONDS}s old — usually because the market's target date "
+        "rolled out of the Open-Meteo forecast window. The shown count is the "
+        "last good read; exit logic treats this as no signal."
+    )
 
     # Per-trade close buttons — horizontal row of buttons, confirmation below
     st.caption("Manual close:")
@@ -831,8 +870,7 @@ if closed_trades:
             "Model %":      round((t.get("estimated_prob") or 0) * 100, 1),
             "Mkt %":        round((t.get("entry_price") or 0) * 100, 1),
             "Ens. Entry":   ens_str,
-            "Ens. Exit":    f"{int(t['current_ensemble_yes'])}/{int(t['current_ensemble_n'])}"
-                            if t.get("current_ensemble_yes") is not None and t.get("current_ensemble_n") else "—",
+            "Ens. Exit":    _ens_current_cell(t),
             "Tr Ens":       _tr_ens(t.get("market_id", ""), t.get("direction", "")),
             "Fill":         round(t["fill_price"], 3),
             "Exit":         round(t.get("exit_price") or 0, 3),
@@ -873,8 +911,7 @@ if closed_trades:
                     "Mkt %":        round((leg.get("entry_price") or 0) * 100, 1),
                     "Ens. Entry":   f"{int(leg.get('entry_ensemble_yes', 0))}/{leg.get('entry_ensemble_n', 0)}"
                                     if leg.get("entry_ensemble_n") else "—",
-                    "Ens. Exit":    f"{int(leg['current_ensemble_yes'])}/{int(leg['current_ensemble_n'])}"
-                                    if leg.get("current_ensemble_yes") is not None and leg.get("current_ensemble_n") else "—",
+                    "Ens. Exit":    _ens_current_cell(leg),
                     "Tr Ens":       "",
                     "Fill":         round(leg["fill_price"], 3),
                     "Exit":         round(leg.get("exit_price") or 0, 3),

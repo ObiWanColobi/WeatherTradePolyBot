@@ -100,3 +100,44 @@ def test_active_market_late_game_divergence_still_fires():
     assert sig.should_exit is True
     assert "late-game market divergence" in sig.reason
     assert sig.urgent is True
+
+
+# ── Unavailable ensemble ─────────────────────────────────────────────────────
+#
+# Regression: when the target date has rolled out of the Open-Meteo forecast
+# window, find_ensemble_day returns None and _get_current_ensemble propagates
+# None up. That must NOT trigger an ensemble-flip exit, even if the price
+# signal alone might look adverse — the ensemble is simply unknowable right now.
+
+def test_no_ensemble_flip_when_current_ensemble_is_none():
+    """Entry ensemble was near-unanimous NO; current ensemble is unavailable.
+    Must not fire ensemble-flip (which would need current_ensemble_pct to compare)."""
+    trade = _trade(
+        end_date=_iso(2),
+        direction="NO",
+        fill_price=0.94,
+        current_price=0.9995,       # favorable — market says NO is winning
+        entry_ensemble_yes=0,       # 0/69 YES at entry — unanimous NO
+        entry_ensemble_n=69,
+    )
+    sig = check_weather_exit(trade, {}, current_ensemble_pct=None)
+
+    # With favorable price and no current ensemble, nothing should fire.
+    # Specifically: no "ensemble flipped" reason, which is the bug we just fixed.
+    assert "ensemble flipped" not in sig.reason
+    assert sig.should_exit is False
+
+
+def test_no_late_game_divergence_when_current_ensemble_is_none():
+    """Late-game divergence requires current_ensemble_pct — if None, skip it."""
+    trade = _trade(
+        end_date=_iso(0.5),         # 30 min until close — well inside late-game window
+        direction="NO",
+        fill_price=0.65,
+        current_price=0.001,        # collapsed price would normally fire
+        entry_ensemble_yes=2,
+        entry_ensemble_n=69,
+    )
+    sig = check_weather_exit(trade, {}, current_ensemble_pct=None)
+
+    assert "late-game market divergence" not in sig.reason

@@ -199,6 +199,7 @@ def init_db():
         _safe_add_column(conn, "trades", "entry_ensemble_n",    "INTEGER")
         _safe_add_column(conn, "trades", "current_ensemble_yes","REAL")
         _safe_add_column(conn, "trades", "current_ensemble_n",  "INTEGER")
+        _safe_add_column(conn, "trades", "current_ensemble_read_at", "TEXT")  # ISO ts of last valid ensemble read; None while stale
         _safe_add_column(conn, "trades", "market_url",          "TEXT")
         _safe_add_column(conn, "trades", "threshold",           "TEXT")
         _safe_add_column(conn, "trades", "actual_resolution",   "TEXT")     # 'YES' | 'NO' | NULL

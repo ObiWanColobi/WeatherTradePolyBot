@@ -4,7 +4,155 @@
 
 ## Upcoming (not yet started)
 
-- [ ] **Extended pass: skip past-close positions for add-ons** — The extended pass evaluates positions with `hours_left < 0` for leg additions. Currently harmless (midpoint guard catches it: "Skipping add-on — no midpoint"), but wasteful and could succeed if CLOB briefly comes back. Add an `hours_left` guard early in the extended pass to skip past-close positions entirely.
+- [ ] **Extended pass: skip past-close positions for add-ons** (was first item, unchanged) —
+
+---
+
+## 2026-04-22 — Wrong-date ensemble fallback + stale-read UI (PLAN, not started)
+
+### Problem
+`find_forecast_day` and `find_ensemble_day` at [layers/layer3_weather.py:267-284](layers/layer3_weather.py#L267-L284) silently fall back to `forecast[1]` / `ensemble[1]` (index 1) when the target date isn't in the cache. When a market's target date rolls out of the Open-Meteo window (happens late in the day in the market's local tz), the code reads **the next day's forecast** and stores it as `current_ensemble_yes/n` for the trade.
+
+Concrete failure (Shanghai NO >=20C, April 22 market):
+- At ~Apr 22 11:58 Shanghai local, cache had Apr 22 → ensemble=0/69 ≈ market=0.9% YES. Consistent.
+- At ~Apr 23 00:30 Shanghai local, Apr 22 rolled out of cache. Cache now has Apr 23/24/25/26.
+- `find_ensemble_day(cache, "2026-04-22")` falls back to `ensemble[1]` = **Apr 24** (mean 21.6°C, 68/69 ≥20°C votes).
+- Trade's `current_ensemble_yes` is updated to 68 → `check_weather_exit` sees a 0→99% "flip" → fires URGENT exit at $0.99 on a position that will settle $1.00 in 7h.
+
+### Blast radius
+Every near-close market reads a wrong future date once the target rolls out of the forecast window. Affects `check_weather_exit` (ensemble flip, late-game divergence) and in principle `WeatherLayer.scan` (entry probability). Entry is self-healing because `scan()` already returns `None` if `point_temp_c is None` — but only after `find_forecast_day` returns `None`, which today it never does. Fix at the helper level cascades correctly to both sides.
+
+### User requirement (added this round)
+Don't just return `None` and let the dashboard show `—`. Keep the **last valid ensemble read** visible, with a stale indicator and timestamp of when it was last accurate. "I still want to be able to see the last real read of the ens (current)".
+
+### Plan
+
+- [ ] **A. Fix silent fallback** — [layers/layer3_weather.py:267-284](layers/layer3_weather.py#L267):
+  - `find_forecast_day`: return `None` when `target_date` isn't in `forecast`. Delete the `forecast[1]` / `forecast[0]` fallback.
+  - `find_ensemble_day`: return `None` when `target_date` isn't in `ensemble`. Delete the `ensemble[1]` fallback.
+  - Update docstrings to say "returns None if target_date is outside the forecast window — callers must treat that as no signal".
+  - Entry cascade: `scan()` at [layer3_weather.py:427](layers/layer3_weather.py#L427) already `return None` when `point_temp_c is None` — no change needed.
+  - Exit cascade: `check_weather_exit()` at [executor/weather_exit.py:84](executor/weather_exit.py#L84) / [:113](executor/weather_exit.py#L113) already gate on `current_ensemble_pct is not None` — no change needed. It falls through to price-only exits (adverse move, late-game floor), which is the correct behavior.
+
+- [ ] **B. Preserve last-good ensemble for UI** — don't overwrite with None:
+  - [weather_bot.py:114](weather_bot.py#L114) already has `if ens_yes is not None and ens_n is not None:` gate before calling `db.update_trade`. That's correct — when `_get_current_ensemble` returns None, the DB row keeps its last good value. Verify this still holds after fix A (it will: `_get_current_ensemble` returns `(None, None, None)` when `scan` returns no `ensemble_n >= 10`, and `scan` will return None when `find_ensemble_day` returns None).
+  - Same at [weather_bot.py:148](weather_bot.py#L148) for leg propagation — same gate, already correct.
+
+- [ ] **C. Add read-at timestamp + DB migration** — needed for UI to show "last read at X":
+  - Add `current_ensemble_read_at TEXT` via `_safe_add_column` at [db.py:201](db.py#L201) (next to existing `current_ensemble_n` line). Idempotent — safe to run repeatedly on VPS DB.
+  - In [weather_bot.py:114-118](weather_bot.py#L114-L118), include `"current_ensemble_read_at": datetime.now(timezone.utc).isoformat()` in the same `db.update_trade` dict. Only written when the read is valid (same gate). Matches pattern at [weather_bot.py:151-154](weather_bot.py#L151) for legs.
+
+- [ ] **D. Dashboard: stale indicator on Ens. Exit column** — [ui/weather_dashboard.py:834-835](ui/weather_dashboard.py#L834-L835) and :876-877 (leg rows):
+  - Compute `is_stale = read_at is None or (now - read_at) > 3 * poll_interval_sec`. Use a hard 300s threshold — if ensemble hasn't been refreshed for 5 min on an open trade, something is off regardless of poll cadence.
+  - When stale: render as `"68/69 (stale)"` in the Ens. Exit cell. Keep the numeric value — this is the explicit user ask.
+  - Add a small caption / tooltip below the Open Positions table: "Ensemble marked (stale) means target date rolled out of the forecast window — last valid read shown". Anchor it so users know what the tag means.
+  - No schema change to the row dict — just string formatting.
+
+- [ ] **E. One-time cleanup for Shanghai row** — the DB currently has `current_ensemble_yes=68` from the wrong-date read. After fix A deploys, no new bad writes happen, but the stale Apr 24 value stays until the trade closes. That's actually OK — with the stale tag (fix D) it'll render as `68/69 (stale)`, which is truthful once `read_at` stops advancing. No migration needed beyond column add.
+
+- [ ] **F. Keep share-reconciliation plan separate.** After fix A deploys, Shanghai's exit shouldn't have fired in the first place (`current_ensemble_pct=None` → no flip signal), so the circuit breaker will self-resolve on its next success. The dust-mismatch bug in `initiate_exit` is still real for legitimate future exits — fix it next, as a follow-up commit. Spec below.
+
+### Verification after deploy
+
+1. In `weather_bot` logs, Shanghai next poll should show `ens=0/69→?/?` (the `?` is because `_cur_ens` in the log at [weather_bot.py:135](weather_bot.py#L135) uses the returned ens values, which will be None). Then `-- hold — no exit condition met` (no flip because current_pct is None).
+2. No more `[live] SELL order: ... shares=10.74` / `GTC sell failed` loop.
+3. `[api_monitor] clob circuit breaker` goes quiet. After cooldown expires the breaker closes on the next successful CLOB call.
+4. Dashboard Open Positions row for Shanghai shows `Ens. Exit: 68/69 (stale)` — last-good value preserved.
+5. Unit test: add a case in `tests/test_weather_exit.py` confirming `current_ensemble_pct=None` does not fire `ensemble_flip` even with a near-unanimous entry ensemble.
+
+### Commit plan
+Single commit on `live`:
+- `layers/layer3_weather.py` — helpers return None
+- `db.py` — add `current_ensemble_read_at` column via `_safe_add_column`
+- `weather_bot.py` — write `read_at` alongside ensemble counts
+- `ui/weather_dashboard.py` — stale tag on Ens. Exit
+- `tests/test_weather_exit.py` — None-handling test
+
+Then push. User pulls on Kamatera.
+
+---
+
+## 2026-04-22 — Exit share reconciliation (PLAN, not started — follow-up to above)
+
+### Problem
+Shanghai NO exit stuck in a CLOB-reject loop tripping the API circuit breaker
+(4 trips → 1800s cooldown). Root cause:
+
+```
+clob call failed: not enough balance / allowance:
+  balance:      10,704,338  (= 10.704338 shares on-chain, scale 1e6)
+  order amount: 10,740,000  (= 10.74 shares, from DB)
+```
+
+`initiate_exit()` at [executor/live.py:1109](executor/live.py#L1109) sums
+`leg["shares"]` from the trades DB (set once at entry fill, db.py:552) and
+posts a GTC sell for that amount. The on-chain ERC-1155 CTF balance is
+~0.036 shares short of the recorded position — dust from a prior partial fill,
+fee, or sibling-redeem remnant that never flowed back into the DB. Every poll
+the sell retries the same over-sized amount; api_monitor escalates the
+cooldown: 120s → 300s → 600s → 1800s.
+
+### Root fix
+Before posting a GTC sell, fetch the on-chain ERC-1155 balance via the existing
+`self._claimer.get_token_balance(...)` helper (same call used at line 1610 in
+the claim path), and reconcile DB `shares` down to match actual claimable
+balance. Matches the pattern from commit cdc41af (sibling-redeem self-heal)
+but at the exit-sizing layer instead of the claim layer.
+
+### Plan
+
+- [ ] **Add `_reconcile_position_shares(legs, token_id) -> float`** in
+      `executor/live.py`:
+  - If `self._claimer is None` → return `sum(leg.shares)` (paper mode / no reconciliation possible).
+  - Call `self._claimer.get_token_balance(proxy_address=WALLET_FUNDER_ADDRESS, token_id=int(token_id))`.
+  - Convert raw uint256 → shares: `on_chain = balance_raw / 1e6`, then
+    `math.floor(on_chain * 100) / 100` (matches the SELL-size truncation rule
+    at line 164).
+  - `recorded = sum(leg.shares)`.
+  - If `on_chain >= recorded` → return `recorded` (no shortfall; normal case).
+  - If `on_chain == 0` → log warning, return `0.0` (caller will skip exit;
+    either RPC hiccup or already off-chain — don't mutate DB on zero).
+  - If `0 < on_chain < recorded` → shortfall detected:
+      - Reduce each leg's `shares` proportionally so `sum == on_chain`
+        (`db.update_trade(leg["id"], {"shares": new_leg_shares})`).
+      - Log `[live] RECONCILE {name}  DB={recorded:.4f} → chain={on_chain:.4f}`.
+      - Discord `warning` notification (surprising event, worth visibility per
+        `feedback_discord_notifications`).
+      - Return `on_chain`.
+
+- [ ] **Wire into `initiate_exit()`** at line 1109:
+  - Replace `total_shares = sum(leg.get("shares", 0) for leg in legs)` with
+    `total_shares = self._reconcile_position_shares(legs, token_id)`.
+  - Keep the existing `if total_shares <= 0: return` guard — now also catches
+    the on-chain-zero case.
+
+- [ ] **No other changes to `_settle_exit`, `manage_pending_exit`, or partial
+      exits.** After reconciliation the DB is self-consistent, so downstream
+      math (leg_share_frac at line 1158, account value at db.py:310-317) keeps
+      working without touching those paths.
+
+- [ ] **Verify on Shanghai** — after deploy, the next poll should:
+  1. Log `[live] RECONCILE Shanghai  DB=10.7400 → chain=10.7043`.
+  2. Post a SELL at 10.70 shares (floor to 2dp).
+  3. CLOB accepts, exit fills, api_monitor circuit breaker auto-resets on
+     first success.
+
+### Non-goals / deferred
+- Not adding a broader "balance sweep" across all open positions each poll —
+  too much RPC load. JIT-at-exit is sufficient and parallels the existing
+  JIT-at-claim pattern.
+- Not touching `record_account_value()` — reconciling downward at exit time is
+  already a conservative signal (unrealized P&L was slightly over-reported,
+  but account value only settles on close anyway).
+- Not changing the circuit breaker thresholds. The fix removes the root cause;
+  escalating cooldowns remain correct behavior for real CLOB failures.
+
+### Commit plan
+Single commit on `live` (no feature branch per
+`feedback_no_feature_branches`). After commit, `git push` then user deploys
+via `git pull` on Kamatera VPS (per `feedback_always_push_before_deploy`).
+
+--- The extended pass evaluates positions with `hours_left < 0` for leg additions. Currently harmless (midpoint guard catches it: "Skipping add-on — no midpoint"), but wasteful and could succeed if CLOB briefly comes back. Add an `hours_left` guard early in the extended pass to skip past-close positions entirely.
 
 - [ ] **Separate "awaiting resolution" from "open" positions** — Past-close positions waiting for Polymarket to resolve should not count as open. They hold position slots hostage, inflate unrealized P&L, and block exposure caps. Options: (A) new status like `awaiting_resolution` with a time-of-close transition, or (B) a separate DB query/view. Either way, decision layer, extended pass, exposure calc, and dashboard all need to stop treating them as active open positions. Design first — this touches many consumers.
 

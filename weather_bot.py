@@ -110,11 +110,15 @@ def run_exit_pass():
 
         current_ens_pct, ens_yes, ens_n = _get_current_ensemble(trade, market_data)
 
-        # Persist latest ensemble counts so the dashboard can show current vs entry
+        # Persist latest ensemble counts so the dashboard can show current vs entry.
+        # Only write when the read is valid — if _get_current_ensemble returned None
+        # (target date outside forecast window), leave the last-good values in place
+        # and let the UI render them with a (stale) tag via current_ensemble_read_at.
         if ens_yes is not None and ens_n is not None:
             db.update_trade(trade["id"], {
-                "current_ensemble_yes": ens_yes,
-                "current_ensemble_n":   ens_n,
+                "current_ensemble_yes":     ens_yes,
+                "current_ensemble_n":       ens_n,
+                "current_ensemble_read_at": datetime.now(timezone.utc).isoformat(),
             })
 
         sig = check_weather_exit(trade, market_data, current_ens_pct)
@@ -146,11 +150,13 @@ def run_exit_pass():
             # Propagate the freshly-fetched ensemble to all legs so every
             # leg records the same exit ensemble (they close simultaneously)
             if ens_yes is not None and ens_n is not None and n_legs > 1:
+                _now_iso = datetime.now(timezone.utc).isoformat()
                 for leg in legs:
                     if leg["id"] != trade["id"]:
                         db.update_trade(leg["id"], {
-                            "current_ensemble_yes": ens_yes,
-                            "current_ensemble_n":   ens_n,
+                            "current_ensemble_yes":     ens_yes,
+                            "current_ensemble_n":       ens_n,
+                            "current_ensemble_read_at": _now_iso,
                         })
             leg_suffix = f" (closing all {n_legs} legs)" if n_legs > 1 else ""
             print(
