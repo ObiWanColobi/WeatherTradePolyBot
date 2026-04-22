@@ -509,7 +509,13 @@ def run(dry_run: bool = False):
     if dry_run:
         print("      Mode          : DRY RUN (no orders will be placed)")
 
-    max_bet = _prompt_max_bet()
+    # Live mode has no stdin under systemd — read the (post-override) cap
+    # directly from WEATHER so the interactive prompt's stale module-level
+    # DEFAULT_MAX_BET can't leak in. Paper mode keeps the prompt.
+    if TRADING_MODE == "live":
+        max_bet = WEATHER["kelly_max_bet_usdc"]
+    else:
+        max_bet = _prompt_max_bet()
     print(f"      Max bet       : ${max_bet:.2f} USDC per trade\n")
 
     # Calibration catch-up — fills any resolution/temperature gaps from downtime
