@@ -25,6 +25,7 @@ from notifications import notify
 from weather_risk import RiskManager, RiskState
 from layers.layer3_weather import WeatherLayer
 from executor.weather_exit import check_weather_exit
+import markets.metar_observer as metar_observer
 from weather_scanner import run_scan
 from weather_decision import evaluate, print_audit
 from weather_extended import check_extended_position
@@ -83,6 +84,12 @@ def run_exit_pass():
     _executor.update_open_positions()
     db.record_account_value()
 
+    if WEATHER.get("metar_enabled", False):
+        try:
+            metar_observer.refresh_all()
+        except Exception as e:
+            print(f"  [metar] refresh failed: {e}")
+
     # Re-fetch after update so the exit loop sees the freshly-written prices,
     # not the stale values from before update_open_positions() ran.
     open_trades = db.get_open_trades()
@@ -121,7 +128,11 @@ def run_exit_pass():
                 "current_ensemble_read_at": datetime.now(timezone.utc).isoformat(),
             })
 
-        sig = check_weather_exit(trade, market_data, current_ens_pct)
+        metar_state = (
+            metar_observer.get_state(trade.get("city") or "")
+            if WEATHER.get("metar_enabled", False) else None
+        )
+        sig = check_weather_exit(trade, market_data, current_ens_pct, metar_state=metar_state)
 
         _city      = (trade.get("city") or "?").title()
         _dir       = (trade.get("direction") or "?").upper()

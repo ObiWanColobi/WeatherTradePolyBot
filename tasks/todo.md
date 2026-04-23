@@ -6,6 +6,8 @@
 
 - [ ] **Extended pass: skip past-close positions for add-ons** (was first item, unchanged) —
 
+- [ ] **Investigate end-of-session observation-dominated pricing edge** — Plan: [tasks/plans/2026-04-22_End-of-Session_Pricing_Edge.md](plans/2026-04-22_End-of-Session_Pricing_Edge.md). Trigger: rootdata article on Polymarket weather trading (https://www.rootdata.com/news/599077) describes "after ~3 PM local, observed temp beats morning ensemble" as one of six observed edges. Overlaps with METAR Phase 1.5b (intraday conditional max). This is a **backtest-first** gate: measure edge magnitude on our historical resolved trades before committing to build. GO/NO-GO decision feeds directly into METAR plan prioritization. Also captures smaller follow-on article insights — settlement-source change monitoring (Polymarket silently switched Shenzhen WU→NOAA 2026-03-29) and a possible "tail lottery" micro-sized carve-out around the 12h cooldown rule.
+
 ---
 
 ## 2026-04-22 — Wrong-date ensemble fallback + stale-read UI (PLAN, not started)

@@ -1,6 +1,7 @@
 import math
 import re
 import time
+from datetime import datetime, timezone
 
 from layers.base import BaseLayer, LayerEstimate
 from markets.open_meteo import get_daily_forecast, get_ensemble_forecasts
@@ -289,6 +290,45 @@ def find_ensemble_day(ensemble: list[dict], target_date: str) -> list[float] | N
     return None
 
 
+# ── Shared threshold parser (used by weather_exit and metar_observer) ─────────
+
+_COMPACT_THRESH_RE = re.compile(
+    r"^([<>]=?)\s*(\d+(?:\.\d+)?)\s*([CcFf])$",
+    re.IGNORECASE,
+)
+_BARE_VALUE_RE = re.compile(
+    r"^(\d+(?:\.\d+)?)\s*([CcFf])$",
+    re.IGNORECASE,
+)
+
+
+def parse_threshold_c(s: str) -> tuple[str, float] | None:
+    """
+    Parse a compact threshold string stored in the trades.threshold column.
+    Formats: '>=9C', '<=15C', '>=66F', '<=21C', '30C', '66F'.
+    Returns (operator, celsius_value) where operator is '>=' or '<='.
+    Returns None on any parse failure.
+    """
+    if not s:
+        return None
+    s = s.strip()
+    m = _COMPACT_THRESH_RE.match(s)
+    if m:
+        op     = m.group(1)
+        value  = float(m.group(2))
+        unit   = m.group(3).upper()
+        temp_c = value if unit == "C" else f_to_c(value)
+        # Normalise operator to two-char form
+        if op in (">=", ">"):
+            return ">=", temp_c
+        if op in ("<=", "<"):
+            return "<=", temp_c
+    # Bare value without operator (exact/range market stored without op) — skip for METAR trigger
+    if _BARE_VALUE_RE.match(s):
+        return None
+    return None
+
+
 # ── WeatherLayer ──────────────────────────────────────────────────────────────
 
 class WeatherLayer(BaseLayer):
@@ -523,4 +563,36 @@ class WeatherLayer(BaseLayer):
             "confidence":        confidence,
             "market_price":      market_price,
             "edge_prob":         edge_prob,
+        }
+
+    def get_cached_ensemble_snapshot(self, city: str) -> dict | None:
+        """
+        Return a snapshot dict for pairing with a METAR observation row:
+          { "point_mean_c", "p05_c", "p50_c", "p95_c", "forecast_run_at_utc" }
+        or None if no cached forecast exists for the city right now.
+        Pure read — never triggers an Open-Meteo fetch.
+        """
+        import time as _time
+        entry = _cache.get(city.lower())
+        if not entry:
+            return None
+        ensemble = entry.get("ensemble", [])
+        if not ensemble:
+            return None
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        member_temps = find_ensemble_day(ensemble, today)
+        if not member_temps or len(member_temps) < 3:
+            return None
+        sorted_t = sorted(member_temps)
+        n        = len(sorted_t)
+        mean_c   = sum(sorted_t) / n
+        p05_c    = sorted_t[max(0, int(n * 0.05))]
+        p50_c    = sorted_t[n // 2]
+        p95_c    = sorted_t[min(n - 1, int(n * 0.95))]
+        return {
+            "point_mean_c":        round(mean_c, 2),
+            "p05_c":               round(p05_c,  2),
+            "p50_c":               round(p50_c,  2),
+            "p95_c":               round(p95_c,  2),
+            "forecast_run_at_utc": datetime.fromtimestamp(entry["ts"], tz=timezone.utc).isoformat(),
         }

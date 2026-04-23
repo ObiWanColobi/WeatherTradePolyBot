@@ -174,6 +174,28 @@ def init_db():
             );
         """)
 
+        # METAR observations — paired with ensemble snapshot for bias-correction training
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS metar_observations (
+                city                  TEXT    NOT NULL,
+                icao                  TEXT    NOT NULL,
+                observed_at_utc       TEXT    NOT NULL,
+                observed_temp_c       REAL    NOT NULL,
+                dewpoint_c            REAL,
+                source                TEXT    NOT NULL,
+                raw_report            TEXT,
+                ensemble_point_mean_c REAL,
+                ensemble_p05_c        REAL,
+                ensemble_p50_c        REAL,
+                ensemble_p95_c        REAL,
+                forecast_run_at_utc   TEXT,
+                fetched_at_utc        TEXT    NOT NULL,
+                PRIMARY KEY (icao, observed_at_utc)
+            );
+            CREATE INDEX IF NOT EXISTS idx_metar_city_obs
+                ON metar_observations(city, observed_at_utc);
+        """)
+
         # Notifications — system alerts and trade events logged for the dashboard
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS notifications (
@@ -1281,3 +1303,23 @@ def get_notifications(
     with get_conn() as conn:
         rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
+
+
+# ── METAR observations ──────────────────────────────────────────────────────
+
+def record_metar_observation(row: dict) -> None:
+    """INSERT OR IGNORE a METAR observation. Primary key (icao, observed_at_utc) deduplicates."""
+    try:
+        with get_conn() as conn:
+            conn.execute("""
+                INSERT OR IGNORE INTO metar_observations
+                    (city, icao, observed_at_utc, observed_temp_c, dewpoint_c,
+                     source, raw_report, ensemble_point_mean_c, ensemble_p05_c,
+                     ensemble_p50_c, ensemble_p95_c, forecast_run_at_utc, fetched_at_utc)
+                VALUES
+                    (:city, :icao, :observed_at_utc, :observed_temp_c, :dewpoint_c,
+                     :source, :raw_report, :ensemble_point_mean_c, :ensemble_p05_c,
+                     :ensemble_p50_c, :ensemble_p95_c, :forecast_run_at_utc, :fetched_at_utc)
+            """, row)
+    except Exception as e:
+        print(f"[db] metar_observations insert failed: {e}")

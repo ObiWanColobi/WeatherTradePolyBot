@@ -17,8 +17,13 @@ What we deliberately do NOT do:
 """
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from config import WEATHER
+from layers.layer3_weather import parse_threshold_c
+
+if TYPE_CHECKING:
+    from markets.metar_observer import MetarState
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -40,7 +45,13 @@ class WeatherExitSignal:
     urgent:      bool = False
 
 
-def check_weather_exit(trade: dict, market_data: dict, current_ensemble_pct: float | None) -> WeatherExitSignal:
+def check_weather_exit(
+    trade: dict,
+    market_data: dict,
+    current_ensemble_pct: float | None,
+    *,
+    metar_state: "MetarState | None" = None,
+) -> WeatherExitSignal:
     """
     Evaluate whether to exit an open weather position.
 
@@ -48,6 +59,7 @@ def check_weather_exit(trade: dict, market_data: dict, current_ensemble_pct: flo
         trade:                 open trade row from DB
         market_data:           current market state (price, liquidity, end_date, token_id)
         current_ensemble_pct:  current P(YES) from ensemble (0.0-1.0), or None if unavailable
+        metar_state:           current METAR state for the trade's city (keyword-only, optional)
 
     Returns:
         WeatherExitSignal — should_exit=False means hold.
@@ -76,6 +88,79 @@ def check_weather_exit(trade: dict, market_data: dict, current_ensemble_pct: flo
     # with no direction-aware logic needed. We never use the Gamma API price here —
     # that was the source of persistent 0.0000 false readings.
     current_price = trade.get("current_price")
+
+    # ── 0. Observed resolution lock (METAR-based) ─────────────────────────────
+    # Checked before all other triggers. Feature-flagged via metar_exit_on_lock.
+    # Fails closed on any missing/uncertain input — never a false exit.
+    if (
+        WEATHER.get("metar_exit_on_lock", False)
+        and metar_state is not None
+        and not metar_state.is_stale
+    ):
+        parsed_thresh = parse_threshold_c(trade.get("threshold") or "")
+        trade_dir     = (trade.get("direction") or "").lower()
+
+        if parsed_thresh is not None and metar_state.max_today_c is not None:
+            op, threshold_c = parsed_thresh
+
+            # Lock-YES: observed max has already reached the "above" threshold.
+            # Only meaningful for ">=" markets — a NO position on such a market is toast.
+            if op == ">=" and trade_dir == "no":
+                if metar_state.max_today_c >= threshold_c:
+                    ts = (
+                        metar_state.last_reading.observed_at_utc.strftime("%H:%MZ")
+                        if metar_state.last_reading else "?"
+                    )
+                    return WeatherExitSignal(
+                        should_exit=True,
+                        reason=(
+                            f"observed lock YES — {metar_state.icao} "
+                            f"max={metar_state.max_today_c:.1f}°C "
+                            f">= threshold {threshold_c:.1f}°C at {ts}"
+                        ),
+                        urgent=True,
+                    )
+
+            # Lock-NO: observed max already breached a "<=" threshold.
+            # A YES position on such a market can no longer resolve YES.
+            if op == "<=" and trade_dir == "yes":
+                if metar_state.max_today_c > threshold_c:
+                    ts = (
+                        metar_state.last_reading.observed_at_utc.strftime("%H:%MZ")
+                        if metar_state.last_reading else "?"
+                    )
+                    return WeatherExitSignal(
+                        should_exit=True,
+                        reason=(
+                            f"observed lock NO — {metar_state.icao} "
+                            f"max={metar_state.max_today_c:.1f}°C "
+                            f"> threshold {threshold_c:.1f}°C at {ts}"
+                        ),
+                        urgent=True,
+                    )
+
+            # Conservative lock-NO for ">=" YES positions:
+            # only exit if ensemble also shows P(YES) < 1% (plan §5.2).
+            if op == ">=" and trade_dir == "yes":
+                if (
+                    metar_state.max_today_c < threshold_c
+                    and current_ensemble_pct is not None
+                    and current_ensemble_pct < 0.01
+                ):
+                    ts = (
+                        metar_state.last_reading.observed_at_utc.strftime("%H:%MZ")
+                        if metar_state.last_reading else "?"
+                    )
+                    return WeatherExitSignal(
+                        should_exit=True,
+                        reason=(
+                            f"observed lock NO — {metar_state.icao} "
+                            f"max={metar_state.max_today_c:.1f}°C "
+                            f"< threshold {threshold_c:.1f}°C "
+                            f"with ensemble P(YES)={current_ensemble_pct:.1%} at {ts}"
+                        ),
+                        urgent=True,
+                    )
 
     # ── 1. Ensemble flip ──────────────────────────────────────────────────────
     # Use raw yes/n counts to reconstruct entry P(YES) — entry_ensemble_pct

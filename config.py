@@ -227,6 +227,24 @@ WEATHER = {
     "clob_inter_request_delay":     0.3,                         # min seconds between CLOB calls
     "heartbeat_stale_threshold":    300,                         # seconds before crash detection fires
     "dashboard_bot_down_threshold": 300,                         # seconds before dashboard shows offline
+
+    # ╔═══════════════════════════════════════════════════════════════════════════╗
+    # ║  METAR / OBSERVED-RESOLUTION FRONT-RUNNING  (Phase 1)                  ║
+    # ║  All flags default OFF — merge is a zero-behavior-change deploy.        ║
+    # ║  Rollout: METAR_ENABLED=True (shadow) → METAR_EXIT_ON_LOCK=True (live)  ║
+    # ╚═══════════════════════════════════════════════════════════════════════════╝
+    "metar_enabled":               os.getenv("METAR_ENABLED",        "false").lower() == "true",
+    "metar_record_to_db":          os.getenv("METAR_RECORD_TO_DB",   "true").lower()  == "true",
+    "metar_exit_on_lock":          os.getenv("METAR_EXIT_ON_LOCK",   "false").lower() == "true",
+    "metar_poll_interval_sec":     60,
+    "metar_stale_ttl_sec":         300,
+    "metar_plausibility_delta_c":  5.0,
+    "metar_avwx_url":              "https://aviationweather.gov/api/data/metar",
+    "metar_hko_url":               "https://data.weather.gov.hk/weatherAPI/opendata/weather.php",
+    "metar_user_agent":            "tradebot0/1.0 (colby.pearson55@gmail.com)",
+
+    # Live override — defaults identical to paper for Phase 1; tune post-shadow
+    "live_metar_exit_on_lock":     os.getenv("LIVE_METAR_EXIT_ON_LOCK", "false").lower() == "true",
 }
 
 # ── API Endpoints ─────────────────────────────────────────────────────────────
@@ -249,6 +267,7 @@ _LIVE_OVERRIDES = {
     "kelly_max_bet_usdc_unanimous": "live_kelly_max_bet_usdc_unanimous",
     "risk_daily_loss_limit_pct":    "live_risk_daily_loss_limit_pct",
     "risk_auto_reset":              "live_risk_auto_reset",
+    "metar_exit_on_lock":           "live_metar_exit_on_lock",
 }
 
 _overrides_applied = False
