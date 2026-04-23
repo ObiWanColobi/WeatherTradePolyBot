@@ -170,11 +170,11 @@ def _fetch_avwx_batch(icaos: list[str]) -> dict[str, list[MetarReading]]:
             params={
                 "ids":    ",".join(icaos),
                 "format": "json",
-                "hours":  36,
+                "hours":  24,
                 "taf":    "false",
             },
             headers={"User-Agent": _USER_AGENT},
-            timeout=10,
+            timeout=30,
         )
         resp.raise_for_status()
         data = resp.json()
