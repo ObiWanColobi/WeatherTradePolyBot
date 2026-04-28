@@ -4,6 +4,8 @@
 
 ## Upcoming (not yet started)
 
+- [ ] **Review tiered edge requirements by entry price** — Reasoning: at high entry prices (0.85+), the payoff ratio is asymmetric (risking $0.90 to win $0.10), so one loss wipes ~9 wins. Current edge thresholds are flat regardless of entry price. Evaluate whether to require progressively higher model edge at higher prices (e.g. 4% at 0.80, 7% at 0.90, 12% at 0.95) to self-select only highest-conviction entries at the most asymmetric price points. Gate on model calibration audit first — if win rate matches predicted probability, flat thresholds may be fine. Start with historical resolved trade analysis segmented by entry price bucket.
+
 - [ ] **Extended pass: skip past-close positions for add-ons** (was first item, unchanged) —
 
 - [ ] **Investigate end-of-session observation-dominated pricing edge** — Plan: [tasks/plans/2026-04-22_End-of-Session_Pricing_Edge.md](plans/2026-04-22_End-of-Session_Pricing_Edge.md). Trigger: rootdata article on Polymarket weather trading (https://www.rootdata.com/news/599077) describes "after ~3 PM local, observed temp beats morning ensemble" as one of six observed edges. Overlaps with METAR Phase 1.5b (intraday conditional max). This is a **backtest-first** gate: measure edge magnitude on our historical resolved trades before committing to build. GO/NO-GO decision feeds directly into METAR plan prioritization. Also captures smaller follow-on article insights — settlement-source change monitoring (Polymarket silently switched Shenzhen WU→NOAA 2026-03-29) and a possible "tail lottery" micro-sized carve-out around the 12h cooldown rule.

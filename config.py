@@ -97,7 +97,7 @@ WEATHER = {
         "chicago", "dallas", "atlanta", "toronto",   # US inland — weak ensemble reliability
         "london", "wellington",                       # coastal — temp swings
     ],
-    "entry_city_strict_min_conviction": 0.95,  # require near-unanimous for these cities (vs 0.85 default)
+    "entry_city_strict_min_conviction": 0.90,  # require near-unanimous for these cities (vs 0.85 default)
     "entry_city_strict_min_margin_c":   4.0,   # require wider margin for these cities (vs 3.0 default)
 
     # ╔═══════════════════════════════════════════════════════════════════════════╗
