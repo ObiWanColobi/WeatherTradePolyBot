@@ -102,11 +102,27 @@ class LiveExecutor(BaseExecutor):
         print(f"[live] CLOB client initialized. Balance: ${balance_usdc:.2f} USDC")
 
     def _get_exchange_balance(self) -> float:
-        """Fetch current USDC balance from the exchange."""
+        """Fetch current USDC balance from the exchange.
+
+        Refuses to return 0 when the DB has a substantial prior balance —
+        Polymarket's CLOB can return empty/malformed responses during outages,
+        and we do not want a transient zero to overwrite real funds.
+        """
         bal_info = self._client.get_balance_allowance(
             BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
         )
-        return int(bal_info.get("balance", "0")) / _USDC_DECIMALS
+        raw = bal_info.get("balance")
+        if raw is None or raw == "":
+            raise RuntimeError(f"CLOB returned no balance field: {bal_info!r}")
+        value = int(raw) / _USDC_DECIMALS
+        if value < 0.01:
+            prior = db.get_balance()
+            if prior > 1.0:
+                raise RuntimeError(
+                    f"CLOB returned $0.00 but DB shows ${prior:.2f}; refusing to sync. "
+                    f"Likely transient Polymarket API error — verify on Polygonscan."
+                )
+        return value
 
     # ── CLOB order helpers ───────────────────────────────────────────────────
 
