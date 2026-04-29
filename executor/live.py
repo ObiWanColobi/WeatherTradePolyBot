@@ -235,7 +235,16 @@ class LiveExecutor(BaseExecutor):
                     matched = float(order.get("size_matched", 0))
                     if matched > 0:
                         price = float(order.get("price", expected_price))
-                        return price, matched, 0.0
+                        # Best-effort fee lookup from trade history. /trades returns
+                        # actual fees per fill; size_matched alone doesn't carry them.
+                        fee = 0.0
+                        try:
+                            details = self._lookup_fill_details(token_id, order_id)
+                            if details is not None:
+                                fee = details[2]
+                        except Exception as e:
+                            print(f"[live] fee lookup failed for {order_id[:12]}: {e}")
+                        return price, matched, fee
 
                     # Status is matched but no details yet — keep polling
                     if attempt < 9:
@@ -260,7 +269,7 @@ class LiveExecutor(BaseExecutor):
         # Order showed matched/filled but trade details never populated.
         # Fall back to get_trades() to find actual fills on this token.
         if saw_matched:
-            result = self._lookup_buy_fills(token_id, order_id)
+            result = self._lookup_fill_details(token_id, order_id)
             if result is not None:
                 return result
             # Last resort: FOK matched = filled at the limit price.
@@ -280,11 +289,13 @@ class LiveExecutor(BaseExecutor):
         # Truly unfilled
         return 0.0, 0.0, 0.0
 
-    def _lookup_buy_fills(self, token_id: str, order_id: str
-                          ) -> tuple[float, float, float] | None:
+    def _lookup_fill_details(self, token_id: str, order_id: str
+                             ) -> tuple[float, float, float] | None:
         """
-        Query CLOB trade history for BUY fills matching this order.
+        Query CLOB trade history for fills matching this order_id.
         Returns (avg_price, total_shares, total_fee) or None if no fills found.
+        Side-agnostic — the /trades endpoint returns both buys and sells, and we
+        match strictly by order_id.
         """
         try:
             self._throttle_clob()
@@ -855,6 +866,18 @@ class LiveExecutor(BaseExecutor):
         db.insert_trade(trade)
         db.update_balance(-filled_usdc)
         db.record_account_value()
+
+        try:
+            snap = db.snapshot_trader_forecasts_on_entry(
+                market_id=trade["market_id"],
+                city=trade.get("city") or "",
+                end_date=(trade.get("end_date") or "")[:10],
+                threshold=trade.get("threshold"),
+            )
+            if snap > 0:
+                print(f"             snapshot: {snap} trader forecast(s) frozen at entry")
+        except Exception as e:
+            print(f"             [warn] trader-forecast snapshot failed: {e}")
 
         print(f"[live] OPEN  {direction:3s}  {market.get('question', '')[:55]}")
         print(f"             Size: ${filled_usdc:.2f}  Fill: {fill_price:.4f}  "

@@ -652,10 +652,16 @@ def run(dry_run: bool = False):
         if risk_state == RiskState.NORMAL:
             run_extended_positions_pass(dry_run=dry_run)
 
-        # Trader monitor — poll tracked wallets for live positions every 10 polls
+        # Trader monitor — poll tracked wallets for live positions every 10 polls.
+        # Union open-trade markets so coverage continues for markets we hold even
+        # after the scanner moves on (otherwise trader_positions is filtered out
+        # and trader_forecasts has nothing to freeze at resolution).
         if poll % TRADER_MONITOR_EVERY_N == 0:
+            monitored_ids = set(weather_condition_ids) | {
+                t["market_id"] for t in db.get_open_trades() if t.get("market_id")
+            }
             try:
-                _trader_monitor.update(weather_condition_ids)
+                _trader_monitor.update(monitored_ids)
             except Exception as e:
                 print(f"[trader_monitor] update error (non-fatal): {e}")
 

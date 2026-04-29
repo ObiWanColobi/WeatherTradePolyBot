@@ -114,6 +114,18 @@ class PaperExecutor(BaseExecutor):
         db.update_balance(-filled_usdc)
         db.record_account_value()
 
+        try:
+            snap = db.snapshot_trader_forecasts_on_entry(
+                market_id=trade["market_id"],
+                city=trade.get("city") or "",
+                end_date=(trade.get("end_date") or "")[:10],
+                threshold=trade.get("threshold"),
+            )
+            if snap > 0:
+                print(f"              snapshot: {snap} trader forecast(s) frozen at entry")
+        except Exception as e:
+            print(f"              [warn] trader-forecast snapshot failed: {e}")
+
         print(f"[paper] OPEN  {direction:3s}  {market['question'][:55]}")
         print(f"              Size: ${filled_usdc:.2f}  Fill: {fill_price:.4f}  "
               f"Slippage: {slippage:.4f}  Edge: {edge_display:+.3f}")
