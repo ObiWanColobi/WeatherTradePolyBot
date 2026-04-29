@@ -18,6 +18,7 @@ venv/
 
 # ── Internal planning / AI notes ─────────────────────────────────────────────
 tasks/
+TradeBot_UserNotes.md
 
 # ── Runtime state ────────────────────────────────────────────────────────────
 discovery_last_run.txt
