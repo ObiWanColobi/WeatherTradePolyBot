@@ -62,8 +62,13 @@ def run_resolve_pass(executor) -> int:
         except Exception:
             continue
 
-        if now < end:
-            continue   # not expired yet
+        # Polymarket resolves weather markets early once METAR locks in the
+        # day's high. Allow the resolution check to run within the final
+        # 12h before nominal close so we don't sit on resolved positions
+        # while their token vanishes from the orderbook.
+        hours_to_end = (end - now).total_seconds() / 3600
+        if hours_to_end > 12:
+            continue   # too early — Polymarket can't resolve this far out
 
         # Use CLOB midpoint on the YES token to check resolution.
         # The Gamma API returns 422 for closed markets, but CLOB midpoint
@@ -108,9 +113,10 @@ def run_resolve_pass(executor) -> int:
                 hours_past = (now - end).total_seconds() / 3600
                 if hours_past > 6:
                     _alert_stale_unresolved(trade, hours_past)
-                else:
+                elif hours_past >= 0:
                     print(f"  [resolve] CLOB midpoint unavailable for "
                           f"{trade['market_name'][:50]} — skipping")
+                # Pre-close (early polling) — silent skip
                 continue
 
         # Only settle if price has actually resolved to near-binary
@@ -119,8 +125,10 @@ def run_resolve_pass(executor) -> int:
         elif yes_price <= _RESOLVED_NO_THRESHOLD:
             resolved_yes = False
         else:
-            # Market expired but price hasn't settled — Polymarket still processing
-            print(f"  [resolve] Waiting on settlement: {trade['market_name'][:50]} YES={yes_price:.2f}")
+            # Price hasn't settled yet. Only log when past nominal close to
+            # avoid spamming during the early-resolution polling window.
+            if hours_to_end <= 0:
+                print(f"  [resolve] Waiting on settlement: {trade['market_name'][:50]} YES={yes_price:.2f}")
             continue
 
         executor.settle_resolved(trade, resolved_yes)

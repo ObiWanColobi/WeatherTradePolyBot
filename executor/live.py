@@ -649,15 +649,65 @@ class LiveExecutor(BaseExecutor):
         """
         Close a DB position that no longer exists on the exchange.
 
-        Queries CLOB trade history to find the actual sell fills and compute
-        real P&L. Falls back to midpoint estimate if no trade history found.
+        Resolution order:
+          1. Resolved-market check — if the market resolved while we were
+             offline and the position was redeemed (auto-claim, sibling, or
+             manual), settle at $1/$0 against the actual outcome. Balance is
+             not credited here; startup balance_sync already absorbed the
+             on-chain redeem proceeds.
+          2. CLOB SELL-fill lookup — for genuinely sold-externally positions.
+          3. Midpoint estimate — last-resort fallback for unresolved markets.
         """
         tid      = trade.get("token_id", "")
         trade_id = trade["id"]
         name     = trade["market_name"][:50]
         cost     = trade.get("size_usdc", 0)
+        market_id = trade.get("market_id", "")
+        direction = (trade.get("direction") or "YES").upper()
 
-        # Try to find actual sell trades from CLOB history
+        # Step 1: resolved-market path. Avoids the midpoint-returns-zero
+        # phantom loss when a winning position gets redeemed externally.
+        resolution = polymarket.get_resolution_status(market_id) if market_id else None
+        if resolution and resolution.get("resolved"):
+            yes_price    = resolution.get("yes_price", 0.0)
+            resolved_yes = yes_price >= 0.5
+            won = (direction == "YES" and resolved_yes) or \
+                  (direction == "NO" and not resolved_yes)
+            exit_price = 1.0 if won else 0.0
+            proceeds   = trade.get("shares", 0) * exit_price
+            pnl        = proceeds - cost
+            pnl_pct    = (pnl / cost * 100) if cost > 0 else 0.0
+
+            db.update_trade(trade_id, {
+                "exit_price":             exit_price,
+                "closed_at":              datetime.now(timezone.utc).isoformat(),
+                "status":                 "closed",
+                "pnl":                    pnl,
+                "pnl_pct":                pnl_pct,
+                "exit_reason":            "resolved (reconciled)",
+                "actual_resolution":      "YES" if resolved_yes else "NO",
+                "forecast_correct":       1 if won else 0,
+                "resolution_price":       1.0 if resolved_yes else 0.0,
+                "claim_status":           "claimed_externally" if won else None,
+                "hours_to_close_at_exit": _hours_until(trade.get("end_date")),
+            })
+            db.record_account_value()
+
+            outcome = "WIN " if won else "LOSS"
+            print(f"[live] AUTO-CLOSED trade #{trade_id} ({name}) — {outcome}")
+            print(f"       P&L: ${pnl:+.2f} ({pnl_pct:+.1f}%)  source=resolved market")
+
+            notify("info" if won else "warning",
+                   "Position Reconciled (Resolved)",
+                   f"Trade #{trade_id} resolved while offline — settled at "
+                   f"${exit_price:.2f}/share",
+                   fields={"Market": name,
+                           "P&L": f"${pnl:+.2f}",
+                           "Outcome": "WIN" if won else "LOSS"},
+                   color=COLOR_GREEN if won else None)
+            return
+
+        # Step 2: try CLOB trade history for actual sell fills
         exit_price, proceeds, fee = self._lookup_sell_fills(tid, trade)
 
         if proceeds is not None:
@@ -665,7 +715,7 @@ class LiveExecutor(BaseExecutor):
             pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
             source  = "trade history"
         else:
-            # Fallback: no trade history found. Use current midpoint as estimate.
+            # Step 3: midpoint estimate (unresolved markets only)
             mid = polymarket.get_midpoint(tid)
             if mid is not None and mid > 0:
                 exit_price = mid
