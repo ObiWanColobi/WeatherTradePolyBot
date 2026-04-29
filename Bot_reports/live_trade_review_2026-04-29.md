@@ -93,21 +93,36 @@ It's now been **6 days** and there are zero observations. The bot is running fin
 3. Defer the 1-week shadow review until we actually have a week of data (target: ~05-06).
 4. *Optional safety:* If the user wants to skip shadow and trust the implementation, we can flip `LIVE_METAR_EXIT_ON_LOCK=true` immediately, but the user explicitly wanted shadow data first.
 
-### Issue #2 — Trader-forecast shadow (`trader_forecasts`) also empty
+### Issue #2 — Trader-forecast shadow (`trader_forecasts`) also empty — **diagnosed: upstream coverage gap**
 
 ```
 SELECT COUNT(*) FROM trader_forecasts;  -- 0
 ```
 
-`trader_positions` *is* fresh (latest snapshot 2026-04-29 17:32 UTC, 1,459 tracked traders), so the discovery/monitor loop runs. But `trader_forecasts` — the entry-decision-time freeze table from Stage 2 — never gets written.
+The freeze hook **is wired** — [executor/live.py:1454](executor/live.py#L1454) and [executor/paper.py:319](executor/paper.py#L319) both call `db.freeze_trader_forecasts()` after every resolution. `freeze_trader_forecasts` then queries `trader_positions WHERE market_id = ?`. The reason nothing lands:
 
-This may be intentional (Stage 2 was marked complete in memory, calibration bug fixed 04-07 with no outstanding items), or it may be a regression where the freeze hook was disconnected. Worth checking `trader_monitor.py` / `weather_decision.py` for the call site.
+```
+trade markets: 25,  trader_positions markets: 5,  overlap: 0
+```
 
-The user's prompt referenced a "shadow database not yet activated — pending data collection." If the intended shadow was `trader_forecasts`, then "we now have data" is not yet true.
+The trader-monitor is snapshotting tracked-trader positions for **5 markets that don't intersect any of the 25 markets the bot has traded**. So when we resolve a market, the freeze function finds zero positions to freeze and inserts zero rows. Same outcome whether the hook fires or not.
 
-### Issue #3 — `fee_usdc` column not populated
+The fix lives upstream in `trader_monitor.py` / `trader_discovery.py`: the snapshot loop should be priming `trader_positions` for the same market set the scanner pulls. Possible causes (need a deeper look — not done in this session): (a) the monitor only snapshots a small randomly-sampled subset and our markets keep getting missed, (b) the discovered traders aren't holding positions on the cities/thresholds we trade, (c) snapshot cadence is rare enough that our markets resolve before the monitor sees them.
 
-Every closed trade since 04-21 shows `fee_usdc = 0.0`. Polymarket charges maker/taker fees on real fills, so this should be a small but non-zero number. Either the executor stopped writing the column, or the value is being recorded under another name. Low priority but distorts net-PnL calculation if you ever want to see it.
+### Issue #3 — `fee_usdc=0.0` regression — **diagnosed: fast-path fall-through**
+
+In `_confirm_fill()` ([executor/live.py:236-238](executor/live.py#L236-L238)), when `associate_trades` returns just trade-ID strings (the common case since bug #10's fix avoided 30s of retries on dict-vs-string), the fast path is:
+
+```python
+matched = float(order.get("size_matched", 0))
+if matched > 0:
+    price = float(order.get("price", expected_price))
+    return price, matched, 0.0   # ← fee always 0.0 on this path
+```
+
+The `_lookup_buy_fills()` fallback (which *does* sum fees from `/trades`) only runs when the fast path can't determine size. Since CLOB order responses include `size_matched` reliably, fees are never queried.
+
+Fix would be: after computing `matched`, opportunistically call `_lookup_buy_fills()` to backfill fee, or accept the `0.0` and stop reporting it as a regression. Polymarket's fee tier appears to be 0 bp on the wallets/markets we trade, so this might actually be reporting reality. **Worth confirming on Polymarket trade history before "fixing."**
 
 ### Issue #4 — `tracked_traders.last_active` format
 
