@@ -86,6 +86,25 @@ class Claimer:
         wei = self._w3.eth.get_balance(self._address)
         return wei / 1e18
 
+    def get_usdc_balance(self, address: str) -> float | None:
+        """Read on-chain USDC.e balance of `address` in human units. Returns None on RPC error."""
+        try:
+            erc20 = self._w3.eth.contract(
+                address=self._w3.to_checksum_address(_USDC_ADDRESS),
+                abi=[{
+                    "constant": True,
+                    "inputs":   [{"name": "owner", "type": "address"}],
+                    "name":     "balanceOf",
+                    "outputs":  [{"name": "", "type": "uint256"}],
+                    "type":     "function",
+                }],
+            )
+            raw = erc20.functions.balanceOf(self._w3.to_checksum_address(address)).call()
+            return raw / 1e6  # USDC is 6 decimals
+        except Exception as e:
+            print(f"[claimer] get_usdc_balance error: {e}")
+            return None
+
     def get_token_balance(self, proxy_address: str, token_id: int) -> int:
         """Raw uint256 CTF ERC-1155 balance of proxy at token_id. 0 on RPC error."""
         try:

@@ -102,27 +102,61 @@ class LiveExecutor(BaseExecutor):
         print(f"[live] CLOB client initialized. Balance: ${balance_usdc:.2f} USDC")
 
     def _get_exchange_balance(self) -> float:
-        """Fetch current USDC balance from the exchange.
+        """Fetch current USDC balance.
 
-        Refuses to return 0 when the DB has a substantial prior balance —
-        Polymarket's CLOB can return empty/malformed responses during outages,
-        and we do not want a transient zero to overwrite real funds.
+        Tries CLOB API first; falls back to direct on-chain read of the proxy's
+        USDC.e balance when CLOB returns empty/zero/malformed. The chain is the
+        ultimate source of truth, so CLOB outages never silently overwrite real
+        funds. Discrepancies fire a Discord alert but the bot proceeds with the
+        chain value.
         """
-        bal_info = self._client.get_balance_allowance(
-            BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        clob_value: float | None = None
+        clob_error: str | None = None
+        try:
+            bal_info = self._client.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            )
+            raw = bal_info.get("balance")
+            if raw is not None and raw != "":
+                clob_value = int(raw) / _USDC_DECIMALS
+            else:
+                clob_error = f"empty balance field in response: {bal_info!r}"
+        except Exception as e:
+            clob_error = str(e)
+
+        if clob_value is not None and clob_value >= 0.01:
+            return clob_value
+
+        # CLOB unhealthy or zero — consult the chain
+        chain_value: float | None = None
+        if self._claimer is not None and WALLET_FUNDER_ADDRESS:
+            chain_value = self._claimer.get_usdc_balance(WALLET_FUNDER_ADDRESS)
+
+        if chain_value is not None:
+            if clob_error:
+                print(f"[live] CLOB balance read failed ({clob_error}) — using on-chain ${chain_value:.2f}")
+                notify("warning", "CLOB balance unavailable",
+                       f"CLOB read failed; proceeding with on-chain USDC balance.",
+                       fields={"On-chain": f"${chain_value:.2f}", "Error": clob_error[:200]})
+            elif clob_value is not None and clob_value < 0.01 and chain_value >= 0.01:
+                print(f"[live] CLOB returned $0 but chain shows ${chain_value:.2f} — using chain")
+                notify("warning", "CLOB/chain balance mismatch",
+                       f"CLOB reported $0.00 but on-chain shows ${chain_value:.2f}. Proceeding with chain value.",
+                       fields={"CLOB": "$0.00", "On-chain": f"${chain_value:.2f}"})
+            else:
+                # Both agree (or chain also ~0) — quiet path
+                print(f"[live] Balance: ${chain_value:.2f} (chain)")
+            return chain_value
+
+        # Chain unavailable too — fall through with whatever CLOB returned (incl. real 0)
+        if clob_value is not None:
+            print(f"[live] Chain fallback unavailable; trusting CLOB value ${clob_value:.2f}")
+            return clob_value
+
+        # Total blackout — refuse to proceed
+        raise RuntimeError(
+            f"Cannot read balance: CLOB failed ({clob_error}) and on-chain fallback unavailable."
         )
-        raw = bal_info.get("balance")
-        if raw is None or raw == "":
-            raise RuntimeError(f"CLOB returned no balance field: {bal_info!r}")
-        value = int(raw) / _USDC_DECIMALS
-        if value < 0.01:
-            prior = db.get_balance()
-            if prior > 1.0:
-                raise RuntimeError(
-                    f"CLOB returned $0.00 but DB shows ${prior:.2f}; refusing to sync. "
-                    f"Likely transient Polymarket API error — verify on Polygonscan."
-                )
-        return value
 
     # ── CLOB order helpers ───────────────────────────────────────────────────
 
