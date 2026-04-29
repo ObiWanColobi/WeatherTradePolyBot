@@ -323,10 +323,24 @@ def _update_city_state(
                 # Park the suspect; wait for next reading
                 pending = reading
 
-        # "no-prior-reading" case: first-boot safety belt — buffer first reading as suspect
+        # "no-prior-reading" case: first-boot safety belt — buffer first reading as suspect,
+        # then confirm against the next reading so we actually escape bootstrap.
         elif reason == "no-prior-reading":
-            pending = reading
-            # Don't advance max_today yet — wait for confirmation
+            if pending is not None:
+                confirm, _ = _plausibility_gate(pending, reading, 2.0)
+                if confirm:
+                    for r in (pending, reading):
+                        today_max = _compute_max_today([r], tz, now_utc)
+                        if today_max is not None and (max_today is None or today_max > max_today):
+                            max_today = today_max
+                        if _RECORD_TO_DB:
+                            _record_to_db(city, r)
+                    pending = None
+                    prev_reading = reading
+                else:
+                    pending = reading
+            else:
+                pending = reading
 
     # Determine staleness
     if fetch_succeeded:
