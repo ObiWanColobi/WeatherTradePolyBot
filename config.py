@@ -15,6 +15,15 @@ WALLET_SIGNATURE_TYPE = int(os.getenv("WALLET_SIGNATURE_TYPE", "0"))
 # Only needed for POLY_PROXY or GNOSIS_SAFE signature types
 WALLET_FUNDER_ADDRESS = os.getenv("WALLET_FUNDER_ADDRESS", "")
 
+# ── Polymarket CLOB V2 (cutover 2026-04-28) ──────────────────────────────────
+# Settlement collateral migrated USDC.e → pUSD; same proxy address.
+# Verify against https://docs.polymarket.com/resources/contracts before trusting.
+POLY_PUSD_ADDRESS         = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
+POLY_USDC_E_ADDRESS       = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+POLY_COLLATERAL_ONRAMP    = "0x93070a847efEf7F70739046A929D47a521F5B8ee"
+POLY_EXCHANGE_V2          = "0xE111180000d2663C0091e4f400237545B87B996B"
+POLY_NEG_RISK_EXCHANGE_V2 = "0xe2222d279d744050d28e00520010520000310F59"
+
 # ── Paper Trading ─────────────────────────────────────────────────────────────
 PAPER_STARTING_BALANCE = 2000.00   # USDC
 LIVE_STARTING_BALANCE  = 4000.00    # USDC — actual funded amount when live trading began
