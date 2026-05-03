@@ -4,6 +4,7 @@ Live Executor
 Real order execution on Polymarket via py-clob-client.
 Implements the same BaseExecutor interface as PaperExecutor.
 """
+import logging
 import math
 import time
 from datetime import datetime, timezone
@@ -14,6 +15,26 @@ from py_clob_client_v2.clob_types import (
     TradeParams,
 )
 from py_clob_client_v2.order_builder.constants import BUY, SELL
+
+
+class _TruncateLongBodies(logging.Filter):
+    # V2 SDK error path logs full HTTP response bodies — including Cloudflare
+    # challenge HTML on transient blocks the SDK then retries through. Cap to
+    # keep journalctl readable; real status/url stay intact.
+    _CAP = 240
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        if len(msg) > self._CAP:
+            record.msg = msg[: self._CAP] + f" ... [+{len(msg) - self._CAP} chars suppressed]"
+            record.args = ()
+        return True
+
+
+logging.getLogger("py_clob_client_v2").addFilter(_TruncateLongBodies())
 
 from executor.base import BaseExecutor
 from chain.claimer import Claimer
@@ -870,8 +891,10 @@ class LiveExecutor(BaseExecutor):
         """Cancel all open orders on startup to prevent ghost fills."""
         try:
             self._throttle_clob()
-            result = self._client.cancel_market_orders()
-            # Result format varies — may be list of cancelled IDs or a status dict
+            # V2 SDK: cancel_all() takes no args and cancels every open order.
+            # (V1's cancel_market_orders() did the same; V2 renamed it and
+            # repurposed cancel_market_orders to require an OrderMarketCancelParams.)
+            result = self._client.cancel_all()
             if result:
                 cancelled = result if isinstance(result, list) else result.get("canceled", [])
                 if cancelled:
