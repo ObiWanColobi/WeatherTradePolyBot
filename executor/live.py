@@ -6,8 +6,10 @@ Implements the same BaseExecutor interface as PaperExecutor.
 """
 import logging
 import math
+import os
 import time
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 
 from py_clob_client_v2.client import ClobClient
 from py_clob_client_v2.clob_types import (
@@ -17,10 +19,29 @@ from py_clob_client_v2.clob_types import (
 from py_clob_client_v2.order_builder.constants import BUY, SELL
 
 
+# V2 SDK error path logs full HTTP response bodies on transient errors
+# (e.g. Cloudflare challenge HTML before the SDK retries through). We:
+#   1. Mirror the original full body to logs/clob_v2_errors.log (rotating,
+#      forensic record kept for real failures).
+#   2. Truncate the version bound for stderr/journalctl so the systemd log
+#      stays readable.
+
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+_FORENSIC_LOG_DIR = os.path.join(_PROJECT_ROOT, "logs")
+_FORENSIC_LOG_PATH = os.path.join(_FORENSIC_LOG_DIR, "clob_v2_errors.log")
+
+os.makedirs(_FORENSIC_LOG_DIR, exist_ok=True)
+
+_forensic_logger = logging.getLogger("py_clob_client_v2.forensic")
+_forensic_logger.setLevel(logging.DEBUG)
+_forensic_logger.propagate = False
+if not _forensic_logger.handlers:
+    _fh = RotatingFileHandler(_FORENSIC_LOG_PATH, maxBytes=5_000_000, backupCount=3)
+    _fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    _forensic_logger.addHandler(_fh)
+
+
 class _TruncateLongBodies(logging.Filter):
-    # V2 SDK error path logs full HTTP response bodies — including Cloudflare
-    # challenge HTML on transient blocks the SDK then retries through. Cap to
-    # keep journalctl readable; real status/url stay intact.
     _CAP = 240
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -29,7 +50,11 @@ class _TruncateLongBodies(logging.Filter):
         except Exception:
             return True
         if len(msg) > self._CAP:
-            record.msg = msg[: self._CAP] + f" ... [+{len(msg) - self._CAP} chars suppressed]"
+            _forensic_logger.log(record.levelno, msg)
+            record.msg = (
+                msg[: self._CAP]
+                + f" ... [+{len(msg) - self._CAP} chars; full body in logs/clob_v2_errors.log]"
+            )
             record.args = ()
         return True
 
