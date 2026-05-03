@@ -4,6 +4,7 @@ Live Executor
 Real order execution on Polymarket via py-clob-client.
 Implements the same BaseExecutor interface as PaperExecutor.
 """
+import json
 import logging
 import math
 import os
@@ -13,8 +14,8 @@ from logging.handlers import RotatingFileHandler
 
 from py_clob_client_v2.client import ClobClient
 from py_clob_client_v2.clob_types import (
-    BalanceAllowanceParams, AssetType, OrderArgs, MarketOrderArgs, OrderType,
-    TradeParams,
+    ApiCreds, BalanceAllowanceParams, AssetType, OrderArgs, MarketOrderArgs,
+    OrderType, TradeParams,
 )
 from py_clob_client_v2.order_builder.constants import BUY, SELL
 
@@ -96,6 +97,46 @@ _USDC_DECIMALS = 1_000_000
 # Polygon mainnet chain ID (module-level so tests can patch it)
 CHAIN_ID = 137
 
+# CLOB API creds are deterministic per wallet. Cache the derived triple so
+# every cold restart doesn't hit /auth/derive-api-key — that endpoint is
+# CF-protected and routinely 35-second-cooldowns the VPS egress IP, blocking
+# the bot from trading and dumping CF challenge HTML into the journal.
+_CREDS_CACHE_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), os.pardir, "data", "clob_v2_creds.json")
+)
+
+
+def _load_cached_creds() -> ApiCreds | None:
+    try:
+        with open(_CREDS_CACHE_PATH, "r") as f:
+            data = json.load(f)
+        return ApiCreds(
+            api_key=data["api_key"],
+            api_secret=data["api_secret"],
+            api_passphrase=data["api_passphrase"],
+        )
+    except (FileNotFoundError, KeyError, ValueError):
+        return None
+
+
+def _save_cached_creds(creds: ApiCreds) -> None:
+    os.makedirs(os.path.dirname(_CREDS_CACHE_PATH), exist_ok=True)
+    payload = {
+        "api_key": creds.api_key,
+        "api_secret": creds.api_secret,
+        "api_passphrase": creds.api_passphrase,
+    }
+    # Write to a temp file then rename for atomicity.
+    tmp = _CREDS_CACHE_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(payload, f)
+    os.replace(tmp, _CREDS_CACHE_PATH)
+    # Owner-only on POSIX (no-op on Windows but harmless).
+    try:
+        os.chmod(_CREDS_CACHE_PATH, 0o600)
+    except OSError:
+        pass
+
 
 class LiveExecutor(BaseExecutor):
     """
@@ -143,13 +184,30 @@ class LiveExecutor(BaseExecutor):
             kwargs["funder"] = funder
 
         self._client = ClobClient(**kwargs)
-        creds = self._client.create_or_derive_api_key()
-        self._client.set_api_creds(creds)
 
-        # Verify allowance — API returns "allowances" dict keyed by contract address
-        bal_info = self._client.get_balance_allowance(
-            BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
-        )
+        # Try cached creds first to skip the CF-protected derive-api-key call.
+        # If the cache is missing or rejected, fall through to a fresh derive.
+        cached = _load_cached_creds()
+        creds_source = "cache"
+        bal_info = None
+        if cached is not None:
+            try:
+                self._client.set_api_creds(cached)
+                bal_info = self._client.get_balance_allowance(
+                    BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+                )
+            except Exception as e:
+                print(f"[live] Cached CLOB creds rejected ({e}) — re-deriving.")
+                bal_info = None
+
+        if bal_info is None:
+            creds_source = "derived"
+            creds = self._client.create_or_derive_api_key()
+            self._client.set_api_creds(creds)
+            _save_cached_creds(creds)
+            bal_info = self._client.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            )
         # Handle both response formats: "allowance" (single) or "allowances" (dict)
         allowances = bal_info.get("allowances", {})
         if allowances:
@@ -163,7 +221,8 @@ class LiveExecutor(BaseExecutor):
 
         balance_pusd = int(bal_info.get("balance", "0")) / _USDC_DECIMALS
         self._cached_balance = balance_pusd
-        print(f"[live] CLOB client initialized. Balance: ${balance_pusd:.2f} pUSD")
+        print(f"[live] CLOB client initialized ({creds_source} creds). "
+              f"Balance: ${balance_pusd:.2f} pUSD")
 
     def _get_exchange_balance(self) -> float:
         """Fetch current collateral balance (pUSD post-V2; USDC.e legacy).
