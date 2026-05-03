@@ -57,16 +57,25 @@ def main():
     client.set_api_creds(creds)
     print(f"CLOB API authenticated successfully")
 
-    # Check and update COLLATERAL (USDC) allowance
-    print("\nChecking COLLATERAL (USDC) allowance...")
+    # Check and update COLLATERAL (pUSD post-V2) allowance.
+    # V2 may return an "allowances" dict keyed by exchange contract address
+    # rather than a single "allowance" string — handle both shapes.
+    print("\nChecking COLLATERAL (pUSD) allowance...")
     bal_info = client.get_balance_allowance(
         BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
     )
     balance = bal_info.get("balance", "0")
-    allowance = bal_info.get("allowance", "0")
-    print(f"  Balance: {int(balance) / 1e6:.2f} USDC, Allowance: {allowance}")
 
-    if allowance == "0" or allowance == 0:
+    def _has_allowance(info: dict) -> bool:
+        allowances = info.get("allowances", {})
+        if allowances:
+            return any(int(v) > 0 for v in allowances.values())
+        return int(info.get("allowance", "0") or 0) > 0
+
+    print(f"  Balance: {int(balance) / 1e6:.2f} pUSD")
+    print(f"  Raw response: {bal_info}")
+
+    if not _has_allowance(bal_info):
         print("  Updating COLLATERAL allowance via CLOB API (no gas needed)...")
         resp = client.update_balance_allowance(
             BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
@@ -77,16 +86,18 @@ def main():
         bal_info = client.get_balance_allowance(
             BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
         )
-        allowance = bal_info.get("allowance", "0")
-        print(f"  Updated allowance: {allowance}")
+        print(f"  Post-update response: {bal_info}")
     else:
         print("  Already approved — skipping.")
 
+    ok = _has_allowance(bal_info)
     print(f"\nSetup complete.")
-    print(f"  USDC balance: {int(balance) / 1e6:.2f}")
-    print(f"  COLLATERAL allowance: {'OK' if allowance not in ('0', 0) else 'FAILED'}")
+    print(f"  pUSD balance: {int(balance) / 1e6:.2f}")
+    print(f"  COLLATERAL allowance: {'OK' if ok else 'FAILED'}")
     print(f"\nNote: CONDITIONAL (CTF token) allowances are per-token and set")
     print(f"automatically when you trade. No manual setup needed.")
+    print(f"\nIf you have lingering USDC.e from pre-V2 claims, wrap it to pUSD:")
+    print(f"  python scripts/wrap_usdce_to_pusd.py")
     print(f"\nYou can now run the bot in live mode.")
     print(f"  Set TRADING_MODE=live in your .env file to enable.")
 
