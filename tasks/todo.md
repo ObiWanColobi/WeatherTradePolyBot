@@ -2,6 +2,18 @@
 
 ---
 
+## 📌 Pinned — Parked ideas (revisit triggers noted)
+
+Strategic items that aren't ready to act on yet. Each has a clear gate before promotion to active work.
+
+- [ ] **Tiered edge requirements by entry price** — gate on model-calibration audit first. Detail at [#upcoming-not-yet-started](#upcoming-not-yet-started) below.
+- [ ] **Extended pass: skip past-close positions for add-ons** — small cleanup, low priority. Detail below and at [#extended-positions-scale-in--complete](#extended-positions-scale-in--complete).
+- [ ] **Separate "awaiting resolution" from "open" positions** — design-first; touches decision layer, extended pass, exposure calc, dashboard. Detail at line ~177 below.
+- [ ] **Trade volume concern** — user flagged 2026-05-02: ~5 trades/day vs 1000+ markets available. Revisit once METAR shadow + claim-wrap settle. Memory: [project_trade_volume_concern.md](../../C:/Users/Colby/.claude/projects/f--CodeProjects-TestCode1/memory/project_trade_volume_concern.md).
+- [ ] **Unrealized-P&L gate on extended legs** — needs ~30+ resolved post-fix trades to evaluate. Detail under Extended Positions section below.
+
+---
+
 ## Upcoming (not yet started)
 
 - [ ] **Review tiered edge requirements by entry price** — Reasoning: at high entry prices (0.85+), the payoff ratio is asymmetric (risking $0.90 to win $0.10), so one loss wipes ~9 wins. Current edge thresholds are flat regardless of entry price. Evaluate whether to require progressively higher model edge at higher prices (e.g. 4% at 0.80, 7% at 0.90, 12% at 0.95) to self-select only highest-conviction entries at the most asymmetric price points. Gate on model calibration audit first — if win rate matches predicted probability, flat thresholds may be fine. Start with historical resolved trade analysis segmented by entry price bucket.
@@ -12,7 +24,19 @@
 
 ---
 
-## 2026-04-22 — Wrong-date ensemble fallback + stale-read UI (PLAN, not started)
+## 2026-04-22 — Wrong-date ensemble fallback + stale-read UI (COMPLETE — verified 2026-05-03)
+
+All six tasks (A–F) are shipped in code on `live`:
+- **A** — `find_forecast_day` / `find_ensemble_day` return `None` outside the window ([layers/layer3_weather.py:268-290](layers/layer3_weather.py#L268-L290)).
+- **B** — `weather_bot.py` writes ensemble counts only when both values are non-None ([weather_bot.py:124-129](weather_bot.py#L124-L129) and [:166-171](weather_bot.py#L166-L171)).
+- **C** — `current_ensemble_read_at` column added; written alongside counts on every valid read.
+- **D** — Dashboard `_format_current_ens_cell` renders `(stale)` when `read_at` is missing or >300s old ([ui/weather_dashboard.py:102-134](ui/weather_dashboard.py#L102-L134)) plus caption at [:644-647](ui/weather_dashboard.py#L644-L647).
+- **E** — One-time Shanghai cleanup was a no-op (handled by stale tag).
+- **F** — `_reconcile_position_shares` shipped at [executor/live.py:1355](executor/live.py#L1355), wired into `initiate_exit` at [:1414](executor/live.py#L1414).
+
+Original spec preserved below for history.
+
+## 2026-04-22 — Wrong-date ensemble fallback + stale-read UI (original spec)
 
 ### Problem
 `find_forecast_day` and `find_ensemble_day` at [layers/layer3_weather.py:267-284](layers/layer3_weather.py#L267-L284) silently fall back to `forecast[1]` / `ensemble[1]` (index 1) when the target date isn't in the cache. When a market's target date rolls out of the Open-Meteo window (happens late in the day in the market's local tz), the code reads **the next day's forecast** and stores it as `current_ensemble_yes/n` for the trade.
@@ -76,7 +100,11 @@ Then push. User pulls on Kamatera.
 
 ---
 
-## 2026-04-22 — Exit share reconciliation (CODE COMPLETE — follow-up to above)
+## 2026-04-22 — Exit share reconciliation (COMPLETE — closed 2026-05-03)
+
+`_reconcile_position_shares` is live at [executor/live.py:1355](executor/live.py#L1355) and wired into `initiate_exit` at [:1414](executor/live.py#L1414). The "Verify on Shanghai" task is moot — that position has long since closed; any future on-chain shortfall will be self-healed JIT at exit time. Original spec preserved below for history.
+
+## 2026-04-22 — Exit share reconciliation (original spec)
 
 ### Problem
 Shanghai NO exit stuck in a CLOB-reject loop tripping the API circuit breaker
