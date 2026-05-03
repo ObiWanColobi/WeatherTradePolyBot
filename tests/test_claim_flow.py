@@ -246,6 +246,48 @@ def test_process_pending_claims_defers_on_low_matic(mock_db):
     mock_db.update_balance.assert_not_called()
 
 
+@patch("executor.live.db")
+def test_process_pending_claims_handles_external_redeem(mock_db):
+    """If shares were already redeemed externally (e.g. Polymarket auto-redeem)
+    and there is no sibling claim, the trade must close as claimed_externally
+    and credit shares*$1 — not get stuck in claim_pending forever (regression
+    test for BA #40, where Polymarket auto-redeem ran before the bot's claim)."""
+    from executor.live import LiveExecutor
+
+    mock_claimer = MagicMock()
+    mock_claimer.get_matic_balance.return_value = 1.0
+    mock_claimer.is_condition_redeemable.return_value = True
+    mock_claimer.get_token_balance.return_value = 0  # shares gone
+
+    ex = LiveExecutor.__new__(LiveExecutor)
+    ex._client = MagicMock()
+    ex._claimer = mock_claimer
+    ex._oracle_alerted = set()
+
+    trade = {
+        "id": 40, "market_id": "0x" + "ab" * 32,
+        "market_name": "Will Buenos Aires be 25C+?",
+        "city": "buenos aires",
+        "direction": "NO", "shares": 80.021333, "size_usdc": 75.22,
+        "token_id": "12345",
+        "claim_status": "claim_pending", "claim_retries": 0,
+        "claim_last_attempt": None, "claim_tx_hash": None,
+    }
+    mock_db.get_pending_claims.return_value = [trade]
+    mock_db.find_confirmed_sibling.return_value = None  # no sibling
+    mock_db.get_stuck_claim_pending_trades.return_value = []
+
+    ex.process_pending_claims()
+
+    update = mock_db.update_trade.call_args[0][1]
+    assert update["status"] == "closed"
+    assert update["claim_status"] == "claimed_externally"
+    assert "closed_at" in update
+    mock_db.update_balance.assert_called_once_with(80.021333)
+    # Should NOT submit a redeem tx — there's nothing to redeem
+    mock_claimer.claim_winnings.assert_not_called()
+
+
 # ── Account value includes claim_pending ────────────────────────────────────
 
 

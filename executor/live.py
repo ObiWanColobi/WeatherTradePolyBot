@@ -1685,7 +1685,7 @@ class LiveExecutor(BaseExecutor):
                        fields={
                            "Market": trade.get("market_name", "")[:60],
                            "Shares": f"{trade.get('shares', 0):.2f}",
-                           "Last tx": trade.get("claim_tx_hash", "none")[:20],
+                           "Last tx": (trade.get("claim_tx_hash") or "none")[:20],
                        })
                 print(f"[claims] FAILED (max retries) — trade #{trade['id']} "
                       f"{trade['market_name'][:40]}")
@@ -1785,12 +1785,29 @@ class LiveExecutor(BaseExecutor):
                 if sibling:
                     self._close_via_sibling(trade, sibling, now)
                     continue
-                print(f"[claims] Trade #{trade['id']} has 0 balance at token_id — "
-                      f"marking as already redeemed elsewhere, skipping")
+                # Market is resolved (ready=True checked above) and shares are gone
+                # with no sibling claim. Polymarket's auto-redeem feature or a manual
+                # UI redeem already pulled them — proceeds went straight to the
+                # proxy. Close as externally claimed and credit shares*$1 so the
+                # bot's accounting catches up. Mirrors the CLOB-sync handler's
+                # behavior for the same scenario detected via the API path.
+                proceeds = float(trade.get("shares") or 0)
+                db.update_balance(proceeds)
                 db.update_trade(trade["id"], {
-                    "claim_status": "claim_no_balance",
+                    "status": "closed",
+                    "closed_at": now.isoformat(),
+                    "claim_status": "claimed_externally",
                     "claim_last_attempt": now.isoformat(),
                 })
+                db.record_account_value()
+                notify("info", "Claim Resolved Externally",
+                       f"Trade #{trade['id']} ({trade.get('city', '?')}) shares "
+                       f"already redeemed (likely Polymarket auto-redeem)",
+                       fields={"Market": (trade.get("market_name") or "")[:60],
+                               "Credited": f"${proceeds:.2f}"},
+                       color=COLOR_GREEN)
+                print(f"[claims] EXTERNAL — trade #{trade['id']} closed "
+                      f"(shares already redeemed, +${proceeds:.2f})")
                 continue
 
             print(f"[claims] Attempting claim for trade #{trade['id']}  "
