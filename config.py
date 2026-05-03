@@ -76,8 +76,8 @@ WEATHER = {
     "entry_min_fill_price_yes":      0.25,  # higher floor for YES tokens — cheap YES bets get killed by adverse exits
     "entry_max_spread_cents":        0.08,  # max bid/ask spread ($0.08)
     "entry_min_hours_to_close":      2.0,   # must have >=2h before resolution
-    "entry_min_ensemble_margin_c":       3.0,   # ensemble mean must be >=3°C from threshold at minimum conviction (raised from 2.0 on 2026-04-07)
-    "entry_min_ensemble_margin_c_floor": 1.5,   # margin floor for unanimous ensembles (0/69 or 69/69); scales linearly up to entry_min_ensemble_margin_c at min conviction
+    "entry_min_ensemble_margin_c":       2.0,   # ensemble mean must be >=2°C from threshold at minimum conviction (lowered from 3.0 on 2026-05-02 — 32-trade review showed 0 losses from <1°C-margin entries; 4-day dry spell from blocking high-conviction Hong Kong candidates by 0.12°C)
+    "entry_min_ensemble_margin_c_floor": 1.0,   # margin floor for unanimous ensembles (0/69 or 69/69); scales linearly up to entry_min_ensemble_margin_c at min conviction (lowered from 1.5 on 2026-05-02 alongside the ceiling)
     "entry_max_slippage_pct":        0.03,  # max simulated fill slippage as % of mid (5%)
     "entry_min_net_edge_pct":        0.06,  # minimum edge remaining after slippage, any tier (5%)
 

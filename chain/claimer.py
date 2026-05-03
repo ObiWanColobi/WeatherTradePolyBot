@@ -21,6 +21,12 @@ from config import WALLET_FUNDER_ADDRESS as _PROXY_ADDRESS
 
 # Polygon contract addresses
 _USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+# Polymarket migrated active settlement to pUSD ~2026-04-30 (linked to auto-redeem).
+# Same proxy address; balances may live in either token. Sum both for the
+# chain-direct balance fallback so the bot doesn't see $0 just because the
+# user's funds were swept to pUSD. Full migration scope is pinned — this is the
+# minimal change to keep the on-chain fallback honest.
+_PUSD_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
 _CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 _WCOL_ADDRESS = "0x3A3BD7bb9528E159577F7C2e685CC81A765002E2"
 _PROXY_FACTORY_ADDRESS = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052"
@@ -87,23 +93,33 @@ class Claimer:
         return wei / 1e18
 
     def get_usdc_balance(self, address: str) -> float | None:
-        """Read on-chain USDC.e balance of `address` in human units. Returns None on RPC error."""
-        try:
-            erc20 = self._w3.eth.contract(
-                address=self._w3.to_checksum_address(_USDC_ADDRESS),
-                abi=[{
-                    "constant": True,
-                    "inputs":   [{"name": "owner", "type": "address"}],
-                    "name":     "balanceOf",
-                    "outputs":  [{"name": "", "type": "uint256"}],
-                    "type":     "function",
-                }],
-            )
-            raw = erc20.functions.balanceOf(self._w3.to_checksum_address(address)).call()
-            return raw / 1e6  # USDC is 6 decimals
-        except Exception as e:
-            print(f"[claimer] get_usdc_balance error: {e}")
-            return None
+        """Read on-chain spendable balance of `address`: USDC.e + pUSD.
+
+        Both are 6-decimal stablecoins pegged 1:1; Polymarket settlement
+        currency moved from USDC.e to pUSD ~2026-04-30. Sum so the fallback
+        keeps working through (and after) the migration. Returns None only
+        when the RPC call itself fails — partial reads return what we got.
+        """
+        abi = [{
+            "constant": True,
+            "inputs":   [{"name": "owner", "type": "address"}],
+            "name":     "balanceOf",
+            "outputs":  [{"name": "", "type": "uint256"}],
+            "type":     "function",
+        }]
+        addr = self._w3.to_checksum_address(address)
+        total_raw = 0
+        any_ok = False
+        for token_addr in (_USDC_ADDRESS, _PUSD_ADDRESS):
+            try:
+                token = self._w3.eth.contract(
+                    address=self._w3.to_checksum_address(token_addr), abi=abi,
+                )
+                total_raw += token.functions.balanceOf(addr).call()
+                any_ok = True
+            except Exception as e:
+                print(f"[claimer] get_usdc_balance error on {token_addr[:10]}…: {e}")
+        return (total_raw / 1e6) if any_ok else None
 
     def get_token_balance(self, proxy_address: str, token_id: int) -> int:
         """Raw uint256 CTF ERC-1155 balance of proxy at token_id. 0 on RPC error."""
