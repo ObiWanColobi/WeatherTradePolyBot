@@ -51,7 +51,7 @@ def init_client() -> ClobClient:
     if WALLET_FUNDER_ADDRESS:
         kwargs["funder"] = WALLET_FUNDER_ADDRESS
     client = ClobClient(**kwargs)
-    client.set_api_creds(client.create_or_derive_api_creds())
+    client.set_api_creds(client.create_or_derive_api_key())
     return client
 
 

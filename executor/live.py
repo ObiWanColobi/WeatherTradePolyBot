@@ -80,7 +80,7 @@ class LiveExecutor(BaseExecutor):
             kwargs["funder"] = funder
 
         self._client = ClobClient(**kwargs)
-        creds = self._client.create_or_derive_api_creds()
+        creds = self._client.create_or_derive_api_key()
         self._client.set_api_creds(creds)
 
         # Verify allowance — API returns "allowances" dict keyed by contract address

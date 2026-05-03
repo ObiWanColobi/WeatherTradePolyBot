@@ -53,7 +53,7 @@ def main():
         kwargs["funder"] = WALLET_FUNDER_ADDRESS
 
     client = ClobClient(**kwargs)
-    creds = client.create_or_derive_api_creds()
+    creds = client.create_or_derive_api_key()
     client.set_api_creds(creds)
     print(f"CLOB API authenticated successfully")
 
