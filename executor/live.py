@@ -25,6 +25,13 @@ from py_clob_client_v2.order_builder.constants import BUY, SELL
 #      forensic record kept for real failures).
 #   2. Truncate the version bound for stderr/journalctl so the systemd log
 #      stays readable.
+#
+# Implementation note: the SDK's actual logger is a child of
+# `py_clob_client_v2` (e.g. `py_clob_client_v2.http_helpers.helpers`).
+# A logger.addFilter() on the parent does NOT apply to child records — only
+# handlers attached to ancestors see propagated records. So we attach our
+# own StreamHandler (with the filter) to the `py_clob_client_v2` parent and
+# turn off propagation so records don't double-emit via the root logger.
 
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 _FORENSIC_LOG_DIR = os.path.join(_PROJECT_ROOT, "logs")
@@ -59,7 +66,17 @@ class _TruncateLongBodies(logging.Filter):
         return True
 
 
-logging.getLogger("py_clob_client_v2").addFilter(_TruncateLongBodies())
+_pcc_parent = logging.getLogger("py_clob_client_v2")
+if not any(getattr(h, "_truncate_installed", False) for h in _pcc_parent.handlers):
+    _stderr_handler = logging.StreamHandler()  # stderr → systemd → journal
+    _stderr_handler.setFormatter(logging.Formatter("%(name)s [%(levelname)s] %(message)s"))
+    _stderr_handler.addFilter(_TruncateLongBodies())
+    _stderr_handler._truncate_installed = True
+    _pcc_parent.addHandler(_stderr_handler)
+    _pcc_parent.propagate = False
+    # Match the SDK's default level so we don't accidentally raise the floor.
+    if _pcc_parent.level == logging.NOTSET:
+        _pcc_parent.setLevel(logging.WARNING)
 
 from executor.base import BaseExecutor
 from chain.claimer import Claimer
