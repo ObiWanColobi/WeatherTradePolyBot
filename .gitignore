@@ -8,6 +8,8 @@ data/clob_v2_creds.json
 *.db
 *.db-shm
 *.db-wal
+*.db.bak*
+Paper_archive/
 
 # ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
@@ -16,10 +18,19 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # ── Internal planning / AI notes ─────────────────────────────────────────────
 tasks/
+!tasks/lessons.md
+!tasks/todo.md
 TradeBot_UserNotes.md
+docs/superpowers/
+
+# ── Local-only reports ───────────────────────────────────────────────────────
+Bot_reports/
 
 # ── Runtime state ────────────────────────────────────────────────────────────
 discovery_last_run.txt
