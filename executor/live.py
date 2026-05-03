@@ -8,12 +8,12 @@ import math
 import time
 from datetime import datetime, timezone
 
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import (
+from py_clob_client_v2.client import ClobClient
+from py_clob_client_v2.clob_types import (
     BalanceAllowanceParams, AssetType, OrderArgs, MarketOrderArgs, OrderType,
     TradeParams,
 )
-from py_clob_client.order_builder.constants import BUY, SELL
+from py_clob_client_v2.order_builder.constants import BUY, SELL
 
 from executor.base import BaseExecutor
 from chain.claimer import Claimer
@@ -95,20 +95,23 @@ class LiveExecutor(BaseExecutor):
             has_allowance = int(bal_info.get("allowance", "0")) > 0
 
         if not has_allowance:
-            print("[live] WARNING: No USDC allowance detected — first order may fail. "
+            print("[live] WARNING: No pUSD allowance detected — first order may fail. "
                   "Run scripts/setup_allowances.py if orders are rejected.")
 
-        balance_usdc = int(bal_info.get("balance", "0")) / _USDC_DECIMALS
-        print(f"[live] CLOB client initialized. Balance: ${balance_usdc:.2f} USDC")
+        balance_pusd = int(bal_info.get("balance", "0")) / _USDC_DECIMALS
+        self._cached_balance = balance_pusd
+        print(f"[live] CLOB client initialized. Balance: ${balance_pusd:.2f} pUSD")
 
     def _get_exchange_balance(self) -> float:
-        """Fetch current USDC balance.
+        """Fetch current collateral balance (pUSD post-V2; USDC.e legacy).
 
-        Tries CLOB API first; falls back to direct on-chain read of the proxy's
-        USDC.e balance when CLOB returns empty/zero/malformed. The chain is the
-        ultimate source of truth, so CLOB outages never silently overwrite real
-        funds. Discrepancies fire a Discord alert but the bot proceeds with the
-        chain value.
+        Tries CLOB API first; falls back to direct on-chain read summing the
+        proxy's USDC.e + pUSD balances when CLOB returns empty/zero/malformed.
+        The chain is the ultimate source of truth, so CLOB outages never
+        silently overwrite real funds. Discrepancies fire a Discord alert but
+        the bot proceeds with the chain value. Caches the resolved value at
+        self._cached_balance so the V2 BUY path can pass user_usdc_balance to
+        MarketOrderArgs without an extra API hop.
         """
         clob_value: float | None = None
         clob_error: str | None = None
@@ -125,6 +128,7 @@ class LiveExecutor(BaseExecutor):
             clob_error = str(e)
 
         if clob_value is not None and clob_value >= 0.01:
+            self._cached_balance = clob_value
             return clob_value
 
         # CLOB unhealthy or zero — consult the chain
@@ -136,7 +140,7 @@ class LiveExecutor(BaseExecutor):
             if clob_error:
                 print(f"[live] CLOB balance read failed ({clob_error}) — using on-chain ${chain_value:.2f}")
                 notify("warning", "CLOB balance unavailable",
-                       f"CLOB read failed; proceeding with on-chain USDC balance.",
+                       f"CLOB read failed; proceeding with on-chain collateral balance.",
                        fields={"On-chain": f"${chain_value:.2f}", "Error": clob_error[:200]})
             elif clob_value is not None and clob_value < 0.01 and chain_value >= 0.01:
                 print(f"[live] CLOB returned $0 but chain shows ${chain_value:.2f} — using chain")
@@ -146,11 +150,13 @@ class LiveExecutor(BaseExecutor):
             else:
                 # Both agree (or chain also ~0) — quiet path
                 print(f"[live] Balance: ${chain_value:.2f} (chain)")
+            self._cached_balance = chain_value
             return chain_value
 
         # Chain unavailable too — fall through with whatever CLOB returned (incl. real 0)
         if clob_value is not None:
             print(f"[live] Chain fallback unavailable; trusting CLOB value ${clob_value:.2f}")
+            self._cached_balance = clob_value
             return clob_value
 
         # Total blackout — refuse to proceed
@@ -187,13 +193,18 @@ class LiveExecutor(BaseExecutor):
         _FOK_REJECTED = {"_fok_rejected": True}
 
         if side == "BUY":
-            # BUY: maker_amount = USDC to spend. Pass as amount, SDK derives shares.
-            amount = math.floor(size * price * 100) / 100  # USDC, truncate to 2 dp
+            # BUY: maker_amount = pUSD to spend. Pass as amount, SDK derives shares.
+            amount = math.floor(size * price * 100) / 100  # pUSD, truncate to 2 dp
+            # V2 fee-aware fill math wants the trader's current balance — pass
+            # the cached value from the most recent _get_exchange_balance() so
+            # the SDK can size shares correctly on thin books.
+            user_bal = getattr(self, "_cached_balance", 0.0) or 0.0
             order_args = MarketOrderArgs(
                 token_id=token_id,
                 price=price,
                 amount=amount,
                 side=clob_side,
+                user_usdc_balance=float(user_bal),
             )
             print(f"[live] BUY order: price={price}, amount=${amount:.2f}, token={token_id[:12]}...")
 

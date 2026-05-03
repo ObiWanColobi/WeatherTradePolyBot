@@ -26,8 +26,8 @@ from config import (
     POLYMARKET_CLOB_API,
 )
 
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+from py_clob_client_v2.client import ClobClient
+from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 
 CHAIN_ID = 137
 
