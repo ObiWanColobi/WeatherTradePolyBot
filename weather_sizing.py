@@ -43,6 +43,114 @@ _HORIZON_DISCOUNTS = {0: 1.00, 1: 0.85, 2: 0.65}
 _HORIZON_DISCOUNT_DEFAULT = 0.45   # 3+ days out
 
 
+def kelly_size_with_diagnostics(
+    balance:            float,
+    model_prob:         float,
+    market_price:       float,
+    direction:          str,
+    ensemble_n:         int = 0,
+    days_to_resolution: int = 0,
+    unanimous:          bool = False,
+    ensemble_margin_c:  float | None = None,
+) -> tuple[float, dict]:
+    """
+    Single-pass Kelly sizing that returns (size, diagnostics).
+
+    The diagnostics dict captures every intermediate value and identifies the
+    binding constraint, so downstream callers can persist a complete record of
+    the decision instead of having to back-derive it from float arithmetic.
+
+    Returns:
+        (size_usdc, diagnostics)
+        size_usdc is 0.0 when no edge exists or the result falls below the
+        minimum bet threshold; diagnostics still describe how that conclusion
+        was reached (binding_constraint = "no_edge" or "min_bet_floor").
+    """
+    if direction.lower() == "no":
+        p     = 1.0 - model_prob
+        price = 1.0 - market_price
+    else:
+        p     = model_prob
+        price = market_price
+
+    price = max(0.01, min(0.99, price))
+    p     = max(0.01, min(0.99, p))
+
+    edge = p - price
+    odds = (1.0 - price) / price
+
+    # Read live caps once so the snapshot is internally consistent
+    max_bet           = WEATHER.get("kelly_max_bet_usdc",           200.00)
+    max_bet_unanimous = WEATHER.get("kelly_max_bet_usdc_unanimous",  50.00)
+    cap_per_bet       = max_bet_unanimous if unanimous else max_bet
+    cap_balance_pct   = balance * _MAX_BALANCE_PCT
+
+    diag: dict = {
+        "balance":             balance,
+        "model_prob":          model_prob,
+        "market_price":        market_price,
+        "p_used":              p,
+        "price_used":          price,
+        "ensemble_n":          ensemble_n,
+        "days_to_resolution":  days_to_resolution,
+        "ensemble_margin_c":   ensemble_margin_c,
+        "is_unanimous":        1 if unanimous else 0,
+        "edge":                edge,
+        "odds":                odds,
+        "kelly_raw":           0.0,
+        "ensemble_scale":      1.0,
+        "horizon_mult":        _HORIZON_DISCOUNTS.get(days_to_resolution, _HORIZON_DISCOUNT_DEFAULT),
+        "margin_mult":         1.0,
+        "kelly_fraction":      _KELLY_FRACTION,
+        "kelly_final":         0.0,
+        "size_pre_cap":        0.0,
+        "cap_per_bet":         cap_per_bet,
+        "cap_balance_pct":     cap_balance_pct,
+        "size_after_caps":     0.0,
+        "binding_constraint":  "no_edge",
+    }
+
+    if edge <= 0:
+        return 0.0, diag
+
+    kelly = edge / odds
+    diag["kelly_raw"] = kelly
+
+    if ensemble_n > 0 and ensemble_n < 30:
+        diag["ensemble_scale"] = ensemble_n / 30
+        kelly *= diag["ensemble_scale"]
+
+    kelly *= diag["horizon_mult"]
+
+    if ensemble_margin_c is not None:
+        diag["margin_mult"] = min(abs(ensemble_margin_c) / 5.0, 1.0)
+        kelly *= diag["margin_mult"]
+
+    kelly *= _KELLY_FRACTION
+    diag["kelly_final"]  = kelly
+    diag["size_pre_cap"] = kelly * balance
+
+    size = diag["size_pre_cap"]
+    binding = "kelly"
+
+    if size > cap_per_bet:
+        size    = cap_per_bet
+        binding = "cap_per_bet"
+    if size > cap_balance_pct:
+        size    = cap_balance_pct
+        binding = "cap_balance_pct"
+    size = max(size, 0.0)
+
+    diag["size_after_caps"]    = round(size, 2)
+    diag["binding_constraint"] = binding
+
+    if size < _MIN_BET_USDC:
+        diag["binding_constraint"] = "min_bet_floor"
+        return 0.0, diag
+
+    return round(size, 2), diag
+
+
 def kelly_size(
     balance:            float,
     model_prob:         float,
@@ -53,71 +161,12 @@ def kelly_size(
     unanimous:          bool = False,
     ensemble_margin_c:  float | None = None,
 ) -> float:
-    """
-    Calculate position size in USDC using fractional Kelly, clamped.
-
-    Args:
-        balance:            current paper/live balance in USDC
-        model_prob:         P(YES) from ensemble (0.0 - 1.0)
-        market_price:       current YES price on Polymarket (0.0 - 1.0)
-        direction:          "yes" or "no"
-        ensemble_n:         number of ensemble members used (lower = less confident)
-        days_to_resolution: whole days until market resolves (0 = same-day, 1 = tomorrow, ...)
-
-    Returns:
-        size in USDC, or 0.0 if Kelly is negative (no edge).
-    """
-    # For BUY NO we invert: p = P(NO) = 1 - model_prob, price = 1 - market_price
-    if direction.lower() == "no":
-        p     = 1.0 - model_prob
-        price = 1.0 - market_price
-    else:
-        p     = model_prob
-        price = market_price
-
-    # Clamp to avoid degenerate inputs
-    price = max(0.01, min(0.99, price))
-    p     = max(0.01, min(0.99, p))
-
-    edge = p - price
-    if edge <= 0:
-        return 0.0   # negative Kelly -- no edge, don't bet
-
-    odds  = (1.0 - price) / price   # profit per dollar staked if we win
-    kelly = edge / odds              # fraction of bankroll to bet
-
-    # Scale down if ensemble is small (< 30 members = less conviction)
-    if ensemble_n > 0 and ensemble_n < 30:
-        kelly *= ensemble_n / 30
-
-    # Forecast horizon discount -- further out = less reliable forecast
-    horizon_mult = _HORIZON_DISCOUNTS.get(days_to_resolution, _HORIZON_DISCOUNT_DEFAULT)
-    kelly *= horizon_mult
-
-    # Ensemble margin scaling (2026-04-15) — bet size proportional to forecast
-    # distance from threshold. 0°C → 0.0x, 5°C+ → 1.0x. Small margin = coin-flip
-    # risk = smaller bet. Large margin = high conviction = full Kelly.
-    if ensemble_margin_c is not None:
-        margin_mult = min(abs(ensemble_margin_c) / 5.0, 1.0)
-        kelly *= margin_mult
-
-    # Apply fractional Kelly and balance cap
-    fraction = kelly * _KELLY_FRACTION
-    size     = fraction * balance
-
-    # Hard caps — read at call time so live overrides are respected
-    max_bet           = WEATHER.get("kelly_max_bet_usdc",           200.00)
-    max_bet_unanimous = WEATHER.get("kelly_max_bet_usdc_unanimous",  50.00)
-    cap  = max_bet_unanimous if unanimous else max_bet
-    size = min(size, cap)
-    size = min(size, balance * _MAX_BALANCE_PCT)
-    size = max(size, 0.0)
-
-    # Drop sub-threshold bets -- not worth the slippage
-    if size < _MIN_BET_USDC:
-        return 0.0
-
-    return round(size, 2)
+    """Backwards-compatible wrapper. Returns only the final size."""
+    size, _ = kelly_size_with_diagnostics(
+        balance, model_prob, market_price, direction,
+        ensemble_n, days_to_resolution, unanimous, ensemble_margin_c,
+    )
+    return size
 
 
 def size_summary(
@@ -130,36 +179,14 @@ def size_summary(
     unanimous:          bool = False,
     ensemble_margin_c:  float | None = None,
 ) -> dict:
-    """
-    Return a dict of sizing diagnostics for logging/display.
-    """
-    if direction.lower() == "no":
-        p     = 1.0 - model_prob
-        price = 1.0 - market_price
-    else:
-        p     = model_prob
-        price = market_price
-
-    price = max(0.01, min(0.99, price))
-    p     = max(0.01, min(0.99, p))
-    edge  = p - price
-    odds  = (1.0 - price) / price if price > 0 else 0
-    kelly = (edge / odds) if odds > 0 and edge > 0 else 0.0
-    horizon_mult = _HORIZON_DISCOUNTS.get(days_to_resolution, _HORIZON_DISCOUNT_DEFAULT)
-
-    size = kelly_size(balance, model_prob, market_price, direction, ensemble_n, days_to_resolution, unanimous, ensemble_margin_c)
-
+    """Return a dict of sizing diagnostics for logging/display."""
+    size, diag = kelly_size_with_diagnostics(
+        balance, model_prob, market_price, direction,
+        ensemble_n, days_to_resolution, unanimous, ensemble_margin_c,
+    )
     return {
-        "direction":       direction,
-        "model_prob":      p,
-        "market_price":    price,
-        "edge":            edge,
-        "odds":            odds,
-        "kelly_raw":       kelly,
-        "horizon_mult":    horizon_mult,
-        "kelly_frac":      kelly * horizon_mult * _KELLY_FRACTION,
-        "size_usdc":       size,
-        "balance":         balance,
-        "max_bet":         _MAX_BET_USDC_UNANIMOUS if unanimous else _MAX_BET_USDC,
-        "days_to_resolve": days_to_resolution,
+        **diag,
+        "direction": direction,
+        "size_usdc": size,
+        "max_bet":   diag["cap_per_bet"],
     }

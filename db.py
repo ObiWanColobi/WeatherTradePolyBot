@@ -212,6 +212,54 @@ def init_db():
                 ON notifications(timestamp DESC);
         """)
 
+        # Sizing decisions — full Kelly diagnostic snapshot per APPROVED candidate.
+        # Lets us answer "why did the bot bet $X" without having to back-derive
+        # from float arithmetic. Written by weather_decision.evaluate() once size
+        # is finalized (after slippage reducer). trade_id is set later if/when
+        # the executor actually opens the trade.
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS sizing_decisions (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id            INTEGER,
+                recorded_at         TEXT    NOT NULL,
+                market_id           TEXT,
+                market_name         TEXT,
+                city                TEXT,
+                direction           TEXT    NOT NULL,
+                -- inputs
+                balance             REAL    NOT NULL,
+                model_prob          REAL,
+                market_price        REAL,
+                p_used              REAL,
+                price_used          REAL,
+                ensemble_n          INTEGER,
+                days_to_resolution  INTEGER,
+                ensemble_margin_c   REAL,
+                is_unanimous        INTEGER NOT NULL,
+                -- intermediates (every multiplier the live formula applies)
+                edge                REAL,
+                odds                REAL,
+                kelly_raw           REAL,
+                ensemble_scale      REAL,
+                horizon_mult        REAL,
+                margin_mult         REAL,
+                kelly_fraction      REAL,
+                kelly_final         REAL,
+                -- caps + final size
+                size_pre_cap        REAL,
+                cap_per_bet         REAL,
+                cap_balance_pct     REAL,
+                size_after_caps     REAL    NOT NULL,
+                slippage_reduced_to REAL,
+                final_size          REAL    NOT NULL,
+                binding_constraint  TEXT    NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_sizing_recorded
+                ON sizing_decisions(recorded_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_sizing_trade
+                ON sizing_decisions(trade_id);
+        """)
+
         # Safe schema migrations — no-op if column already exists
         _safe_add_column(conn, "trades", "edge_score",         "REAL")
         _safe_add_column(conn, "trades", "liquidity",          "REAL")
@@ -1369,6 +1417,28 @@ def get_notifications(
     with get_conn() as conn:
         rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
+
+
+# ── Sizing decisions ────────────────────────────────────────────────────────
+
+def write_sizing_decision(decision: dict) -> int:
+    """Persist a Kelly sizing snapshot. Caller fills every column except trade_id."""
+    cols         = ", ".join(decision.keys())
+    placeholders = ", ".join("?" for _ in decision)
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"INSERT INTO sizing_decisions ({cols}) VALUES ({placeholders})",
+            list(decision.values()),
+        )
+        return cur.lastrowid
+
+
+def link_sizing_decision_to_trade(sizing_id: int, trade_id: int) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE sizing_decisions SET trade_id = ? WHERE id = ?",
+            (trade_id, sizing_id),
+        )
 
 
 # ── METAR observations ──────────────────────────────────────────────────────

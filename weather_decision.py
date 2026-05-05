@@ -29,7 +29,8 @@ from config import WEATHER
 import db
 from markets.polymarket import simulate_fill
 from weather_entry import check_entry
-from weather_sizing import kelly_size
+from datetime import datetime, timezone
+from weather_sizing import kelly_size_with_diagnostics
 from weather_risk import RiskManager
 import trader_monitor
 
@@ -200,13 +201,15 @@ def evaluate(
         is_unanimous    = entry.checks.get("edge", {}).get("unanimous", False)
         scan_data       = candidate.get("_scan_data") or {}
         ens_margin_c    = scan_data.get("ensemble_margin_c")
-        size = kelly_size(
+        size, sizing_diag = kelly_size_with_diagnostics(
             balance, mdl_prob, mkt_price, direction, ens_n, days,
             unanimous=is_unanimous,
             ensemble_margin_c=ens_margin_c,
         )
-        if not is_unanimous:
-            size = min(size, max_bet)   # only apply the override cap to normal trades
+        if not is_unanimous and size > max_bet:
+            size = max_bet
+            sizing_diag["binding_constraint"] = "cap_per_bet_override"
+            sizing_diag["cap_per_bet"]        = max_bet
 
         if size == 0.0:
             rejected.append(DecisionResult(
@@ -227,6 +230,7 @@ def evaluate(
                         market.get("no_token_id") or market.get("token_id"))
         mid_price = market["price"] if direction == "yes" else (1.0 - market["price"])
 
+        slippage_reduced_to: float | None = None
         if token_id and mid_price > 0:
             _, slippage_pct, fillable = simulate_fill(token_id, size, mid_price)
 
@@ -254,6 +258,8 @@ def evaluate(
                     ))
                     continue
 
+                slippage_reduced_to = reduced
+                sizing_diag["binding_constraint"] = "slippage"
                 size = reduced  # proceed with reduced size
 
             # ── 5b. Post-slippage net edge check ──────────────────────────────
@@ -300,6 +306,26 @@ def evaluate(
         provisional_exposure += size
 
         unanimous_tag = " [unanimous]" if is_unanimous else ""
+        try:
+            db.write_sizing_decision({
+                "recorded_at":         datetime.now(timezone.utc).isoformat(),
+                "market_id":           market_id,
+                "market_name":         candidate.get("_market", {}).get("question") or candidate.get("city_display", ""),
+                "city":                city,
+                "direction":           direction,
+                **{k: sizing_diag[k] for k in (
+                    "balance", "model_prob", "market_price", "p_used", "price_used",
+                    "ensemble_n", "days_to_resolution", "ensemble_margin_c", "is_unanimous",
+                    "edge", "odds", "kelly_raw", "ensemble_scale", "horizon_mult",
+                    "margin_mult", "kelly_fraction", "kelly_final", "size_pre_cap",
+                    "cap_per_bet", "cap_balance_pct", "size_after_caps", "binding_constraint",
+                )},
+                "slippage_reduced_to": slippage_reduced_to,
+                "final_size":          size,
+            })
+        except Exception as e:
+            print(f"[decision] sizing_decision write failed: {e}")
+
         approved.append(DecisionResult(
             candidate=candidate,
             verdict="APPROVED",

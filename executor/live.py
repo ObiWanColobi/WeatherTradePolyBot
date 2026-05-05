@@ -534,6 +534,9 @@ class LiveExecutor(BaseExecutor):
         3. Fetch actual positions from Polymarket and reconcile with DB
         4. Import orphaned positions (exist on exchange but not in DB)
         5. Auto-close stale DB positions (in DB but gone from exchange)
+        6. Reconcile share counts for positions present on both sides — closes
+           the drift window where DB shares > on-chain balance after a crash
+           or sibling redeem, so the first exit doesn't have to discover it.
         """
         # ── Cancel leftover orders ───────────────────────────────────────────
         # Orders left on the book from a previous session can fill while the
@@ -621,8 +624,33 @@ class LiveExecutor(BaseExecutor):
             if tid and tid not in exchange_by_token:
                 self._close_stale_position(t)
 
-        # Summary
+        # ── Share-count drift sync ───────────────────────────────────────────
+        # For positions that exist on BOTH DB and exchange, the orphan/stale
+        # loops above don't touch share counts — so a crash mid-fill (or a
+        # partial sibling redeem while the bot was down) can leave DB shares
+        # higher than the true on-chain ERC-1155 balance. Without this pass,
+        # the drift only surfaces at exit time, when _reconcile_position_shares
+        # fires the "Position Reconciled" alert and clamps the sell quantity.
+        # Reconciling at startup closes the window so exits can size correctly
+        # on the very first poll.
         db_trades = db.get_open_trades()  # re-fetch after imports
+        seen_parents: set[int] = set()
+        for t in db_trades:
+            tid = t.get("token_id", "")
+            if not tid or tid not in exchange_by_token:
+                continue
+            parent_id = t.get("parent_trade_id") or t["id"]
+            if parent_id in seen_parents:
+                continue
+            seen_parents.add(parent_id)
+            legs = db.get_position_legs(parent_id) or [t]
+            try:
+                self._reconcile_position_shares(legs, tid)
+            except Exception as e:
+                print(f"[live] startup reconcile failed for parent={parent_id}: {e}")
+
+        # Summary
+        db_trades = db.get_open_trades()  # re-fetch after share reconcile
         if not db_trades:
             print("[live] No open positions to resume.")
         else:
