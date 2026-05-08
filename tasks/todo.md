@@ -11,6 +11,66 @@ Strategic items that aren't ready to act on yet. Each has a clear gate before pr
 - [ ] **Separate "awaiting resolution" from "open" positions** — design-first; touches decision layer, extended pass, exposure calc, dashboard. Detail at line ~177 below.
 - [ ] **Trade volume concern** — user flagged 2026-05-02: ~5 trades/day vs 1000+ markets available. Revisit once METAR shadow + claim-wrap settle. Memory: [project_trade_volume_concern.md](../../C:/Users/Colby/.claude/projects/f--CodeProjects-TestCode1/memory/project_trade_volume_concern.md).
 - [ ] **Unrealized-P&L gate on extended legs** — needs ~30+ resolved post-fix trades to evaluate. Detail under Extended Positions section below.
+- [ ] **METAR Phase 1 — flip `LIVE_METAR_EXIT_ON_LOCK=true`** — held pending future-session review. State as of 2026-05-07: shadow code live since 2026-04-29 (commit `e8638a3` bootstrap fix); 1,636 paired obs in `metar_observations`, 21 cities, 81% ensemble-pairing rate, range 2026-04-29 → 2026-05-05. **Original time gate (~2026-05-06) is hit.** Two blockers remain before the flag can flip: (1) `scripts/metar_backtest.py` does not exist — the 2026-04-22 plan made the backtest the explicit go/no-go gate (replay `metar_observations` × closed trades, compute would-have-fired + P&L delta + false-positive count); (2) only 2 trades resolved during the shadow window (Toronto #47, Munich #48), so the live "zero false positives" check has effectively no statistical power without the backtest. **Decision deferred** to a future session — METAR is a defensive loss-recovery trigger, orthogonal to the E-series entry/sizing work, but with so many other research-stream changes queued (E15 Phase 0, G1_strict, E2-02, direction-agreement, E12-01) the user wants to review whether METAR is still worth prioritizing in that mix before writing the backtest. Plan: [plans/2026-04-22_METAR Data Implementation.md](plans/2026-04-22_METAR%20Data%20Implementation.md). Memory: [project_metar_resolution_frontrunning.md](../../C:/Users/Colby/.claude/projects/f--CodeProjects-TestCode1/memory/project_metar_resolution_frontrunning.md).
+
+---
+
+## 📌 Pinned — From E6 audit (2026-05-07)
+
+Findings doc: [findings/2026-05-07_e6_audit_real_trades.md](findings/2026-05-07_e6_audit_real_trades.md). Bot-changes index: [findings/bot_changes.md](findings/bot_changes.md).
+
+### High-confidence (act this cycle)
+
+- [ ] **E6-13 — Hours-to-close window tightening (12-24h sweet spot)** — Live data: 12-24h bucket has n=8 / 100% win / +$32; 24-36h bucket has n=11 / 73% win / -$2 (bot's most-common entry zone, weakest yield). Median entry hours-to-close currently 20.3h. Action: investigate restricting `hours_to_close_max` toward ~30h, or weighting Kelly stake by hours-to-close band. Forward-shadow first.
+- [ ] **Forward-shadow `trajectory_aware`** — Add a logged-but-non-acting check at decision time: `|D-1 ens-mean − D-5 ens-mean| ≥ 1°C AND direction-consistent with ensemble probability`. Capture for 30 days, compare per-trade Δ vs current. Backtest signal: +4.4% ROI at production / T06.
+- [ ] **Drop or invert E2-01 fast-flip contra logic** — Backtest: 2.7% win rate when betting against fast price moves. Confirmed in audit as anti-edge. Remove from any candidate strategy; if revisited, test inverted direction (bet WITH the flip).
+- [ ] **Skip `persistence_aware` deployment with the +20pp prior** — Backtest -$317 with the +20pp boost; user intuition agreed. Don't ship. If revisited, test smaller nudge (+5pp / +10pp) or per-city tuning.
+- [x] **E6-15 — Data hygiene: city-name capitalization in trades (COMPLETE 2026-05-08)** — Backup at `weather_bot.db.bak_20260508_095839`. (a) Added `_norm_city(d)` helper in [db.py](../db.py) wired into `insert_trade`, `upsert_city_log`, `write_sizing_decision`, `record_metar_observation` (the `trader_forecasts` paths already use `city.lower()` inline). (b) One-shot `UPDATE … SET city = LOWER(TRIM(city))` ran across all 5 city-bearing tables: 5 rows normalized in `trades` (Munich/munich→munich(6), Tel Aviv/tel aviv→tel aviv(5), Denver/denver→denver(2), Dallas→dallas); 0 in the other 4 (already clean). Verified via integration test of all 4 dict-writers. **Tel-Aviv -100% ROI cohort investigation task is moot** — the 2 capitalized rows merged into the lowercase cohort, so the "separate winning vs losing tel-aviv cohort" was an artifact of the cap split.
+
+### Forward-shadow candidates (lower confidence)
+
+- [ ] **Forward-shadow the direction-agreement filter at PRODUCTION op-point** — The actual signal from `per_city_deterministic`. Best single backtest cell was at very-loose op-point (+$1,972 / 9.7% ROI / n=532) but very-loose uses **double-Kelly sizing** (margin 0.5) which is theoretically dangerous. The real finding is the **direction-agreement gate**: only enter when calibrated GEFS-31 ensemble AND city-best deterministic forecast (ICON for HK/TA/BA/Denver/Beijing/Istanbul; GFS for Shanghai/Paris/Chicago; per-city-MAE picks for the rest) point the same way. Shadow that gate at production op-point first (conviction 0.85, edge floor 1pp, half-Kelly). Plan: [plans/2026-05-07_direction_agreement_shadow.md](plans/2026-05-07_direction_agreement_shadow.md).
+- [ ] **E6-14 — Local-time-of-day soft block at city-local 12-15h** — Live: n=3 trades, 0 wins, -$14.69. Anecdotal but consistent and low-cost to add as soft block in shadow mode (logged-but-non-acting).
+
+### Investigation tasks
+
+- [x] ~~**Tel-Aviv-capitalized -100% ROI cohort upstream cause**~~ — **MOOT 2026-05-08 via E6-15.** The cap-Tel-Aviv 2-trade losing cohort merged into the lowercase tel-aviv cohort (now 5 trades total). The "separate cohort" was a data-hygiene artifact, not a real upstream pattern.
+- [ ] **Bot's actual entry-time distribution audit** — Backtest E6 found "decision-time T06 vs T12 swings $1,074." Live data shows median UTC hour 16, median local hour 8, median hours-to-close 20.3h — likely fine but worth confirming intentional.
+
+### Next-session work (single-pass plan)
+
+- [x] **Deliverable E7 — isolated testing + timing audit (COMPLETE 2026-05-07)** — Findings doc at [findings/2026-05-07_deliverable_E7_isolated_testing.md](findings/2026-05-07_deliverable_E7_isolated_testing.md). 17 helps / 3 neutral / 1 hurts / 3 framework-gap. Tclose-12h is the only positive timing cell for `current` (+$0.52/trade) — biggest lever surfaced. E4-03 rejected. E6 fast-flip lookahead leak found and fixed (E6 microstructure magnitudes were inflated; directional rejections still stand). bot_changes.md updated with new statuses.
+- (Universe expansion + Direction-agreement now sequenced under "Research-stream sequencing" below — see §🥇 / §pinned-for-last)
+- [x] **E8 — Tclose-12h selection-bias quantification (COMPLETE 2026-05-07)** — Findings doc at [findings/2026-05-07_deliverable_E8_tclose_selection_bias.md](findings/2026-05-07_deliverable_E8_tclose_selection_bias.md). Clock-shift IS real, not artifact. Paired BOTH cohort (n=474): Δ +$1.87/tr, 95% CI [+$0.55, +$3.39]. Mechanism: yes_price drift gives NO bet more shares per dollar at 12h. Trap warning: 12h-only cohort (n=59) is -$3.25/trade; clock-shift needs anti-momentum guardrail.
+- [x] **E9 — Trap-guardrail design + backtest (COMPLETE 2026-05-07)** — Findings doc at [findings/2026-05-07_deliverable_E9_trap_guardrail.md](findings/2026-05-07_deliverable_E9_trap_guardrail.md). G1_strict ("would-have-fired-at-18h-equivalent") wins +$1,284 swing vs status quo. Counterintuitive: price-stability gates ALL lose money — they filter out the source of E8's resolved-NO lift. **E6-13 promoted to `code-review` with G1_strict spec.**
+
+### Action-now follow-ups from E9
+
+- [x] **E10 — 18h-anchor offset sensitivity sweep (COMPLETE 2026-05-07)** — Findings doc at [findings/2026-05-07_deliverable_E10_anchor_sensitivity.md](findings/2026-05-07_deliverable_E10_anchor_sensitivity.md). Sensitivity is flat: all four gaps {3h, 6h, 9h, 12h} land within $60 gross / $0.11 pnl-per-trade. Bot can use any cached yes_price from 3-12h prior. Spec stays at 6h.
+- [x] **E11 — G1_strict composability check (COMPLETE 2026-05-07)** — Findings doc at [findings/2026-05-07_deliverable_E11_composability.md](findings/2026-05-07_deliverable_E11_composability.md). Composes cleanly with current/E2-02/E1-09; partial with B-01. **Strongest cell in entire E-series: E2-02 + G1_strict_6h = +$646 gross at +$2.20/tr on n=294.** Forward-shadow this as primary ship candidate.
+### Research-stream sequencing (per `feedback_research_before_implementation.md`)
+
+User-set ordering 2026-05-07 mid-session: complete ALL research before bot implementation. Bot phase begins only after the research stream closes; direction-agreement shadow code is pinned to AFTER bot implementation phase too.
+
+#### 🥇 E12 — Universe expansion falsification (COMPLETE 2026-05-07)
+- [x] **E12 — Universe expansion falsification (COMPLETE 2026-05-07)** — Cities: seoul, london, nyc, taipei, miami, ankara, atlanta, tokyo, seattle, wellington. Loaders 06/08/10/11/12/19 extended + run; ~45 min ingestion. Re-scoped mid-session from full E7/E11 re-run (8-12h) to slim falsification (option B, 2h actual). **Answer: NO structural reason to exclude any new city.** New-cohort EXCLUDE rate (50%) ≈ bot-cohort EXCLUDE rate (54%); per-city verdicts unreliable per Munich precedent. Forward-shadow candidates: London +$10.5/tr, Tokyo +$6.7/tr, Taipei +$2.2/tr, Seoul +$1.5/tr. Findings: [findings/2026-05-07_deliverable_E12_universe_falsification.md](findings/2026-05-07_deliverable_E12_universe_falsification.md). E12-01 added to bot_changes.md as `forward-shadow-gate`, pinned per research-first ordering AFTER bot implementation.
+
+#### 🥈 Next: research follow-ups
+- [ ] **E13 — E6 panel rebuild with Tclose-aware fast-flips** — From E7 follow-up #2. E6's `microstructure_gated` strategy and "E2-01 contra anti-edge" finding both used the panel-wide flip aggregation that E7 fixed. Magnitudes likely overstated; directional rejections probably hold. ~1-2h.
+- [ ] **E14 — G1_strict × sizing-flavor strategies composability** — From E11 follow-up #3. Test G1_strict against E1-02, E1-05, E2-03, E3-07, E4-02. Likely composes (sizing is orthogonal to entry filter) but worth a confirmation run. ~30-45 min.
+- [ ] **(conditional) Cluster cap calibration sweep** — From E7 follow-up #1. Only if E4-02 surfaces strongly post-shadow. Sweep cap ∈ {50, 75, 100, 150}. Skip if E4-02 doesn't surface.
+
+#### 🥉 After all research: bot-side implementation phase
+- [ ] **Bot-side G1_strict guardrail implementation** — Per E9/E10/E11 spec. Cache yes_price from prior poll per candidate market; re-evaluate would-have-fired-at-18h using cached price + unchanged ensemble. ~10-20 LOC, reversible config flag. Forward-shadow capture columns: `g1_anchor_yes_price`, `g1_anchor_would_fire`. **Do not start until research stream closes.**
+- [ ] **Bot-side E2-02 NO-flip continuation gate** — Strongest backtest composite cell. Requires real-time flip detection plumbing (caveat from E11). Forward-shadow capture: `e2_02_flip_state` per trade. After G1_strict ships.
+
+#### Pinned for last: Direction-agreement shadow code
+- [ ] **Direction-agreement shadow code on bot side** — Plan: [plans/2026-05-07_direction_agreement_shadow.md](plans/2026-05-07_direction_agreement_shadow.md). 5 open questions (calibration map shippability, bot's calibrated-prob computation, per-city σ source, ICON cache freshness, city-name normalization). 5-6h bot work. **Pinned to AFTER all current research closes AND after G1_strict + E2-02 implementation ship.**
+
+### Retracted from earlier E6 todo set
+
+- ~~E6-04 explicit price-band gate~~ — already shipped via `_MIN_FILL_PRICE = 0.15` ([weather_entry.py:39](../weather_entry.py#L39)) + slippage / min-net-edge guards.
+- ~~E6-11 per-city stake adjustment from backtest ranking~~ — REVERSED by live audit. Backtest per-city ranking does not match reality (Munich was called "drag" by backtest; reality says #1 profit center).
 
 ---
 

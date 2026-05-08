@@ -7,6 +7,13 @@ _DB_PATH = DB_PATH
 _MEM_CONN: sqlite3.Connection | None = None  # shared connection for :memory: testing
 
 
+def _norm_city(d: dict) -> dict:
+    c = d.get("city")
+    if isinstance(c, str):
+        return {**d, "city": c.strip().lower()}
+    return d
+
+
 def get_conn() -> sqlite3.Connection:
     global _MEM_CONN
     if _DB_PATH == ":memory:":
@@ -405,6 +412,7 @@ def get_balance_history() -> list[dict]:
 # ── Trades ────────────────────────────────────────────────────────────────────
 
 def insert_trade(trade: dict) -> int:
+    trade        = _norm_city(trade)
     cols         = ", ".join(trade.keys())
     placeholders = ", ".join("?" for _ in trade)
     with get_conn() as conn:
@@ -777,6 +785,7 @@ def upsert_city_log(entry: dict):
     Insert or update a daily city volume snapshot.
     Unique on (logged_date, city, threshold) — safe to call multiple times per day.
     """
+    entry = _norm_city(entry)
     with get_conn() as conn:
         conn.execute("""
             INSERT INTO weather_city_log
@@ -1423,6 +1432,7 @@ def get_notifications(
 
 def write_sizing_decision(decision: dict) -> int:
     """Persist a Kelly sizing snapshot. Caller fills every column except trade_id."""
+    decision     = _norm_city(decision)
     cols         = ", ".join(decision.keys())
     placeholders = ", ".join("?" for _ in decision)
     with get_conn() as conn:
@@ -1445,6 +1455,7 @@ def link_sizing_decision_to_trade(sizing_id: int, trade_id: int) -> None:
 
 def record_metar_observation(row: dict) -> None:
     """INSERT OR IGNORE a METAR observation. Primary key (icao, observed_at_utc) deduplicates."""
+    row = _norm_city(row)
     try:
         with get_conn() as conn:
             conn.execute("""
