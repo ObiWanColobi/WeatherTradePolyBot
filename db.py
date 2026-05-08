@@ -335,6 +335,13 @@ def init_db():
         _safe_add_column(conn, "decision_snapshots", "ens_p05", "REAL")
         _safe_add_column(conn, "decision_snapshots", "ens_p95", "REAL")
 
+        # E4-05 (2026-05-08): prev-day same-city resolution outcome. Read from
+        # weather_city_log at decision time — the cheapest free signal per E4
+        # findings (+19.5pp lift). prev_day_outcome is 'YES' / 'NO' / NULL;
+        # prev_day_question stores the threshold string for coverage debugging.
+        _safe_add_column(conn, "decision_snapshots", "prev_day_outcome",  "TEXT")
+        _safe_add_column(conn, "decision_snapshots", "prev_day_question", "TEXT")
+
         # Backfill hours_to_close for trades that predate this column
         conn.executescript("""
             UPDATE trades
@@ -844,6 +851,26 @@ def mark_city_log_resolved(logged_date: str, city: str, threshold: str, resolved
                SET resolved_yes = ?
              WHERE logged_date = ? AND city = ? AND threshold = ?
         """, (1 if resolved_yes else 0, logged_date, city, threshold))
+
+
+def get_prev_day_resolution(city: str, before_date: str) -> dict | None:
+    """E4-05: most recent resolved weather_city_log row for `city` with
+    logged_date strictly before `before_date`. Returns dict with
+    'logged_date', 'threshold', 'resolved_yes' or None if no resolved row
+    exists in the window. Picks the highest-volume threshold when multiple
+    rows share the same most-recent date.
+    """
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT logged_date, threshold, resolved_yes, volume_24h
+              FROM weather_city_log
+             WHERE city = ?
+               AND logged_date < ?
+               AND resolved_yes IS NOT NULL
+             ORDER BY logged_date DESC, volume_24h DESC
+             LIMIT 1
+        """, (city.lower(), before_date)).fetchone()
+    return dict(row) if row else None
 
 
 def get_city_avg_volume(city: str, days: int = 14) -> float | None:

@@ -446,12 +446,25 @@ def _write_phase2_snapshot(sizing_id: int, city: str, res_date: str) -> None:
     # Phase2-02: ensemble spread from layer3 cache (no new API call).
     spread = _ensemble_spread_stats(get_cached_member_temps(city, res_date))
 
+    # E4-05: prev-day same-city resolution outcome (DB read, no API call).
+    prev_outcome:  str | None = None
+    prev_question: str | None = None
+    try:
+        prev = db.get_prev_day_resolution(city, res_date)
+        if prev:
+            prev_outcome  = "YES" if prev["resolved_yes"] == 1 else "NO"
+            prev_question = prev.get("threshold")
+    except Exception as e:
+        print(f"[decision] phase2 prev-day lookup failed city={city}: {e}")
+
     db.write_decision_snapshot({
         "sizing_decision_id": sizing_id,
         "captured_at":        datetime.now(timezone.utc).isoformat(),
         "det_icon_temp_c":    icon_temp,
         "det_gfs_temp_c":     gfs_temp,
         "det_source_tag":     src_tag,
+        "prev_day_outcome":   prev_outcome,
+        "prev_day_question":  prev_question,
         **spread,
     })
 
