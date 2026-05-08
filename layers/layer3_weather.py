@@ -253,6 +253,12 @@ def get_city_forecast(city_key: str, coords: dict, max_age: float | None = None)
     entry = {"ts": now, "forecast": forecast, "ensemble": ensemble}
     _cache[city_key] = entry
     db.save_forecast_cache(city_key, now, forecast, ensemble)
+    # Phase2-04: sidecar history for trajectory backfill (INSERT OR IGNORE,
+    # first-of-day wins per (city, init_date, target_date)).
+    try:
+        db.save_ensemble_history(city_key, ensemble, captured_ts=now)
+    except Exception as e:
+        print(f"[weather] save_ensemble_history failed city={city_key}: {e}")
     return entry
 
 

@@ -32,7 +32,7 @@ from markets.open_meteo import get_deterministic_per_model
 from markets.polymarket import get_trade_velocity
 from layers.layer3_weather import CITY_COORDS, get_cached_member_temps
 from weather_entry import check_entry
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from weather_sizing import kelly_size_with_diagnostics
 from weather_risk import RiskManager
 import trader_monitor
@@ -371,6 +371,35 @@ def _temp_for_date(forecast: list[dict], target_date: str) -> float | None:
     return None
 
 
+def _trajectory_stats(city: str, res_date: str) -> dict:
+    """Phase2-04: D-5..D-1 ensemble trajectory toward `res_date`.
+    Reads from weather_ensemble_history (zero new API calls). Returns
+    {traj_init_d{N}: mean, traj_spread_d{N}: std} for N in 1..5; NULL when
+    that init isn't in history yet (e.g. bot deployed less than 5 days ago).
+    """
+    out = {}
+    try:
+        target = datetime.fromisoformat(res_date).date()
+    except Exception:
+        for n in range(1, 6):
+            out[f"traj_init_d{n}"]   = None
+            out[f"traj_spread_d{n}"] = None
+        return out
+
+    for n in range(1, 6):
+        init_date = (target - timedelta(days=n)).isoformat()
+        members = db.get_ensemble_init(city, init_date, res_date)
+        if not members or len(members) < 3:
+            out[f"traj_init_d{n}"]   = None
+            out[f"traj_spread_d{n}"] = None
+            continue
+        m = sum(members) / len(members)
+        var = sum((t - m) ** 2 for t in members) / len(members)
+        out[f"traj_init_d{n}"]   = m
+        out[f"traj_spread_d{n}"] = var ** 0.5
+    return out
+
+
 def _ensemble_spread_stats(member_temps: list[float] | None) -> dict:
     """Phase2-02: std / IQR / p05 / p95 for a list of GEFS-31 member temps.
     Needs >=3 members; returns all-NULL otherwise. NumPy-free for
@@ -457,6 +486,11 @@ def _write_phase2_snapshot(sizing_id: int, city: str, res_date: str, market_id: 
     except Exception as e:
         print(f"[decision] phase2 prev-day lookup failed city={city}: {e}")
 
+    # Phase2-04: D-5..D-1 ensemble trajectory toward res_date. Pure DB read
+    # against weather_ensemble_history (sidecar of every ensemble fetch);
+    # zero new API calls.
+    traj_stats = _trajectory_stats(city, res_date)
+
     # Phase2-05: Polymarket trade velocity (gamma /trades). One fetch per
     # approved trade — the write_sizing_decision gate naturally throttles
     # this to actual trade rate.
@@ -481,6 +515,7 @@ def _write_phase2_snapshot(sizing_id: int, city: str, res_date: str, market_id: 
         "trades_per_min_30":  tpm_30,
         "trades_per_min_60":  tpm_60,
         **spread,
+        **traj_stats,
     })
 
 

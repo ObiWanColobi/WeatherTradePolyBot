@@ -349,6 +349,31 @@ def init_db():
         _safe_add_column(conn, "decision_snapshots", "trades_per_min_30", "REAL")
         _safe_add_column(conn, "decision_snapshots", "trades_per_min_60", "REAL")
 
+        # Phase2-04 (2026-05-08): multi-init GEFS-31 trajectory (D-5..D-1).
+        # init_d{N} is ensemble mean as of N days before the market's
+        # resolution date; spread_d{N} is the standard deviation. Filled
+        # from weather_ensemble_history (sidecar of every ensemble fetch).
+        for n in (5, 4, 3, 2, 1):
+            _safe_add_column(conn, "decision_snapshots", f"traj_init_d{n}",   "REAL")
+            _safe_add_column(conn, "decision_snapshots", f"traj_spread_d{n}", "REAL")
+
+        # Sidecar history of every ensemble fetch — one row per
+        # (city, init_date, target_date) on first daily fetch (INSERT OR
+        # IGNORE keeps first-of-day-wins). Zero new API calls; the bot is
+        # already fetching the ensemble live.
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS weather_ensemble_history (
+                city           TEXT NOT NULL,
+                init_date      TEXT NOT NULL,
+                target_date    TEXT NOT NULL,
+                member_temps   TEXT NOT NULL,
+                captured_at    TEXT NOT NULL,
+                PRIMARY KEY (city, init_date, target_date)
+            );
+            CREATE INDEX IF NOT EXISTS idx_ens_hist_city_target
+                ON weather_ensemble_history(city, target_date);
+        """)
+
         # Phase2-06 (2026-05-08): live flip detector. Shadow-only; piggybacks
         # on the 60s scanner tick. Each row is one detected price-flip event
         # for downstream Phase 3 NO-flip continuation gate (E2-02).
@@ -1181,6 +1206,55 @@ def save_forecast_cache(city_key: str, ts: float, forecast: list, ensemble: list
                 forecast = excluded.forecast,
                 ensemble = excluded.ensemble
         """, (city_key, ts, json.dumps(forecast), json.dumps(ensemble)))
+
+
+def save_ensemble_history(city: str, ensemble: list, captured_ts: float | None = None) -> None:
+    """Phase2-04: append one row per (city, init_date=today, target_date)
+    for each day in the ensemble. INSERT OR IGNORE keeps first-of-day-wins
+    so bot tick chatter doesn't churn rows.
+    """
+    if not ensemble:
+        return
+    if captured_ts is None:
+        captured_ts = datetime.now(timezone.utc).timestamp()
+    init_date_str = datetime.fromtimestamp(captured_ts, tz=timezone.utc).strftime("%Y-%m-%d")
+    captured_iso  = datetime.fromtimestamp(captured_ts, tz=timezone.utc).isoformat()
+    city_norm = (city or "").strip().lower()
+    if not city_norm:
+        return
+    rows = []
+    for day in ensemble:
+        target = day.get("date")
+        members = day.get("member_temps") or []
+        if not target or not members:
+            continue
+        rows.append((city_norm, init_date_str, target, json.dumps(members), captured_iso))
+    if not rows:
+        return
+    with get_conn() as conn:
+        conn.executemany("""
+            INSERT OR IGNORE INTO weather_ensemble_history
+                (city, init_date, target_date, member_temps, captured_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, rows)
+
+
+def get_ensemble_init(city: str, init_date: str, target_date: str) -> list[float] | None:
+    """Phase2-04: return member temps from a past ensemble fetch on
+    `init_date` predicting `target_date`, or None if not in history.
+    """
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT member_temps
+              FROM weather_ensemble_history
+             WHERE city = ? AND init_date = ? AND target_date = ?
+        """, (city.lower(), init_date, target_date)).fetchone()
+    if not row:
+        return None
+    try:
+        return json.loads(row["member_temps"])
+    except Exception:
+        return None
 
 
 def load_forecast_cache() -> dict:
