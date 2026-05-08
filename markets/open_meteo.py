@@ -79,6 +79,74 @@ def get_daily_forecast(lat: float, lon: float, tz: str = "auto", days: int = 4) 
     return []
 
 
+def get_deterministic_per_model(
+    lat: float,
+    lon: float,
+    model: str,
+    tz: str = "auto",
+    days: int = 4,
+) -> list[dict]:
+    """
+    Daily max-temperature forecast from a single named deterministic model.
+
+    Phase 2 (2026-05-08) capture for `decision_snapshots`. `model` is passed
+    through as the Open-Meteo `models=` param (e.g. `icon_seamless`,
+    `gfs_seamless`). Per the 2026-05-08 hist-API freshness probe, the live
+    forecast endpoint already serves real regional data on intraday calls —
+    no historical-forecast-api branch is needed. Same retry / breaker /
+    timeout semantics as `get_daily_forecast`.
+
+    Each entry: {"date": "YYYY-MM-DD", "temp_max_c": float}.
+    Returns [] on failure. Caller should treat empty as missing-data.
+    """
+    if api_monitor.get_breaker("open_meteo").state == "OPEN":
+        return []
+
+    for attempt in range(1 + len(_RETRY_DELAYS)):
+        if attempt > 0:
+            time.sleep(_RETRY_DELAYS[attempt - 1])
+        try:
+            resp = _session.get(
+                FORECAST_API,
+                params={
+                    "latitude":         lat,
+                    "longitude":        lon,
+                    "daily":            "temperature_2m_max",
+                    "timezone":         tz,
+                    "forecast_days":    days,
+                    "temperature_unit": "celsius",
+                    "models":           model,
+                },
+                timeout=10,
+            )
+            if resp.status_code in (502, 503):
+                print(f"[open_meteo] det model={model} ({lat},{lon}): "
+                      f"{resp.status_code} Server Error — skipping retries")
+                api_monitor.get_breaker("open_meteo").record_failure(retriable=True)
+                return []
+            resp.raise_for_status()
+            data  = resp.json()
+            daily = data.get("daily", {})
+            dates = daily.get("time", [])
+            temps = daily.get("temperature_2m_max", [])
+            api_monitor.get_breaker("open_meteo").record_success()
+            return [
+                {"date": d, "temp_max_c": float(t)}
+                for d, t in zip(dates, temps)
+                if t is not None
+            ]
+        except (ReqConnectionError, ReadTimeout, Timeout) as e:
+            print(f"[open_meteo] det model={model} ({lat},{lon}): {e}")
+            api_monitor.get_breaker("open_meteo").record_failure(retriable=True)
+            return []
+        except Exception as e:
+            if attempt < len(_RETRY_DELAYS):
+                continue
+            print(f"[open_meteo] det model={model} ({lat},{lon}): {e}")
+            api_monitor.get_breaker("open_meteo").record_failure(retriable=True)
+    return []
+
+
 _ENSEMBLE_MODELS = ["icon_seamless", "gfs025"]   # 40 + 31 = up to 71 members
 
 

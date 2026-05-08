@@ -265,6 +265,21 @@ def init_db():
                 ON sizing_decisions(recorded_at DESC);
             CREATE INDEX IF NOT EXISTS idx_sizing_trade
                 ON sizing_decisions(trade_id);
+
+            -- Phase 2 logging foundation (2026-05-08): shadow capture of
+            -- decision-time signals not used to gate trades. One row per
+            -- sized decision, keyed on sizing_decisions.id. Columns added
+            -- incrementally by Phase2-0N items via _safe_add_column.
+            CREATE TABLE IF NOT EXISTS decision_snapshots (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                sizing_decision_id   INTEGER NOT NULL,
+                captured_at          TEXT    NOT NULL,
+                det_icon_temp_c      REAL,
+                det_gfs_temp_c       REAL,
+                det_source_tag       TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_decsnap_sizing
+                ON decision_snapshots(sizing_decision_id);
         """)
 
         # Safe schema migrations — no-op if column already exists
@@ -1458,6 +1473,24 @@ def link_sizing_decision_to_trade(sizing_id: int, trade_id: int) -> None:
             "UPDATE sizing_decisions SET trade_id = ? WHERE id = ?",
             (trade_id, sizing_id),
         )
+
+
+# ── Decision snapshots (Phase 2 logging foundation) ────────────────────────
+
+def write_decision_snapshot(snapshot: dict) -> int:
+    """Persist a Phase 2 shadow snapshot keyed on sizing_decisions.id.
+
+    Caller fills whichever capture columns it has; missing columns stay NULL.
+    Required: sizing_decision_id, captured_at.
+    """
+    cols         = ", ".join(snapshot.keys())
+    placeholders = ", ".join("?" for _ in snapshot)
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"INSERT INTO decision_snapshots ({cols}) VALUES ({placeholders})",
+            list(snapshot.values()),
+        )
+        return cur.lastrowid
 
 
 # ── METAR observations ──────────────────────────────────────────────────────

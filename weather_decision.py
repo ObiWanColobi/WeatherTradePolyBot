@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from config import WEATHER
 import db
 from markets.polymarket import simulate_fill
+from markets.open_meteo import get_deterministic_per_model
+from layers.layer3_weather import CITY_COORDS
 from weather_entry import check_entry
 from datetime import datetime, timezone
 from weather_sizing import kelly_size_with_diagnostics
@@ -310,8 +312,9 @@ def evaluate(
         # Until Phase 3 Platt calibration ships, raw_prob == calibrated_prob == model_prob.
         # fixed_mode_stake_usdc is the E15.4 fixed_50 baseline, captured for later
         # Kelly-vs-fixed-stake research on real trade outcomes.
+        sizing_id: int | None = None
         try:
-            db.write_sizing_decision({
+            sizing_id = db.write_sizing_decision({
                 "recorded_at":         datetime.now(timezone.utc).isoformat(),
                 "market_id":           market_id,
                 "market_name":         candidate.get("_market", {}).get("question") or candidate.get("city_display", ""),
@@ -333,6 +336,16 @@ def evaluate(
         except Exception as e:
             print(f"[decision] sizing_decision write failed: {e}")
 
+        # Phase2-01: shadow-capture deterministic ICON + GFS at decision time.
+        # Wrapped — never blocks the trade flow. Hist-API freshness probe
+        # 2026-05-08 confirmed live-forecast endpoint serves real regional data
+        # on intraday calls, so seamless models suffice.
+        if sizing_id is not None:
+            try:
+                _write_phase2_snapshot(sizing_id, city, res_date)
+            except Exception as e:
+                print(f"[decision] phase2 snapshot failed sizing_id={sizing_id}: {e}")
+
         approved.append(DecisionResult(
             candidate=candidate,
             verdict="APPROVED",
@@ -347,6 +360,63 @@ def evaluate(
     approved.sort(key=lambda r: r.score, reverse=True)
 
     return approved + rejected
+
+
+def _temp_for_date(forecast: list[dict], target_date: str) -> float | None:
+    for entry in forecast:
+        if entry.get("date") == target_date:
+            t = entry.get("temp_max_c")
+            return float(t) if t is not None else None
+    return None
+
+
+def _write_phase2_snapshot(sizing_id: int, city: str, res_date: str) -> None:
+    """Phase2-01 capture: deterministic ICON + GFS at decision time.
+
+    Always inserts a row keyed on `sizing_id`. NULL temps mean either the
+    OM call failed or the city is missing from CITY_COORDS — in both cases
+    the row's existence is itself useful for coverage analysis.
+    """
+    coords = CITY_COORDS.get(city)
+    icon_temp: float | None = None
+    gfs_temp:  float | None = None
+    src_tag = "skipped/no-coords"
+
+    if coords:
+        # Day count: open-meteo forecast_days param accepts 1..16. We need
+        # whatever day the market resolves on, capped at 7 for the Phase2-01
+        # snapshot scope. Days >7 are rare for Polymarket weather markets.
+        target_dt = datetime.fromisoformat(res_date).date()
+        today_dt  = datetime.now(timezone.utc).date()
+        days_out  = max(1, min(7, (target_dt - today_dt).days + 1))
+
+        try:
+            icon_fc = get_deterministic_per_model(
+                coords["lat"], coords["lon"], "icon_seamless",
+                tz=coords.get("tz", "auto"), days=days_out,
+            )
+            icon_temp = _temp_for_date(icon_fc, res_date)
+        except Exception as e:
+            print(f"[decision] phase2 icon fetch failed city={city}: {e}")
+
+        try:
+            gfs_fc = get_deterministic_per_model(
+                coords["lat"], coords["lon"], "gfs_seamless",
+                tz=coords.get("tz", "auto"), days=days_out,
+            )
+            gfs_temp = _temp_for_date(gfs_fc, res_date)
+        except Exception as e:
+            print(f"[decision] phase2 gfs fetch failed city={city}: {e}")
+
+        src_tag = "live-forecast/icon_seamless+gfs_seamless"
+
+    db.write_decision_snapshot({
+        "sizing_decision_id": sizing_id,
+        "captured_at":        datetime.now(timezone.utc).isoformat(),
+        "det_icon_temp_c":    icon_temp,
+        "det_gfs_temp_c":     gfs_temp,
+        "det_source_tag":     src_tag,
+    })
 
 
 def print_audit(results: list[DecisionResult]):
