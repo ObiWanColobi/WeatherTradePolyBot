@@ -342,6 +342,28 @@ def init_db():
         _safe_add_column(conn, "decision_snapshots", "prev_day_outcome",  "TEXT")
         _safe_add_column(conn, "decision_snapshots", "prev_day_question", "TEXT")
 
+        # Phase2-06 (2026-05-08): live flip detector. Shadow-only; piggybacks
+        # on the 60s scanner tick. Each row is one detected price-flip event
+        # for downstream Phase 3 NO-flip continuation gate (E2-02).
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS flip_events (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                detected_at     TEXT    NOT NULL,
+                market_id       TEXT    NOT NULL,
+                city            TEXT,
+                direction       TEXT    NOT NULL,
+                price_before    REAL    NOT NULL,
+                price_after     REAL    NOT NULL,
+                delta_pct       REAL    NOT NULL,
+                minutes_window  REAL    NOT NULL,
+                poll_tick_id    TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_flip_events_market
+                ON flip_events(market_id, detected_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_flip_events_city
+                ON flip_events(city, detected_at DESC);
+        """)
+
         # Backfill hours_to_close for trades that predate this column
         conn.executescript("""
             UPDATE trades
@@ -1525,6 +1547,21 @@ def write_decision_snapshot(snapshot: dict) -> int:
         cur = conn.execute(
             f"INSERT INTO decision_snapshots ({cols}) VALUES ({placeholders})",
             list(snapshot.values()),
+        )
+        return cur.lastrowid
+
+
+def write_flip_event(event: dict) -> int:
+    """Phase2-06: persist one detected flip event. Caller supplies all fields
+    except id; poll_tick_id is optional.
+    """
+    event = _norm_city(event)
+    cols         = ", ".join(event.keys())
+    placeholders = ", ".join("?" for _ in event)
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"INSERT INTO flip_events ({cols}) VALUES ({placeholders})",
+            list(event.values()),
         )
         return cur.lastrowid
 

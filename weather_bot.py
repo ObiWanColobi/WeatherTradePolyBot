@@ -26,6 +26,7 @@ from weather_risk import RiskManager, RiskState
 from layers.layer3_weather import WeatherLayer
 from executor.weather_exit import check_weather_exit
 import markets.metar_observer as metar_observer
+from markets.flip_detector import FlipDetector, is_enabled as _flip_enabled
 from weather_scanner import run_scan
 from weather_decision import evaluate, print_audit
 from weather_extended import check_extended_position
@@ -42,6 +43,7 @@ POSITION_SYNC_EVERY_N  = WEATHER.get("position_sync_poll_every_n",  10)
 
 _layer        = WeatherLayer()
 _risk_manager: RiskManager | None = None
+_flip_detector = FlipDetector()
 
 
 from executor import create_executor
@@ -204,6 +206,38 @@ def run_entry_pass(already_traded: set, max_bet: float, dry_run: bool = False) -
     db.save_scan_cache(all_candidates)   # dashboard reads from here — no separate scan needed
 
     weather_condition_ids = {c["_market"]["id"] for c in all_candidates if c.get("_market")}
+
+    # Phase2-06: shadow flip detector over the full candidate set (not just
+    # not-yet-traded ones) so coverage continues post-entry. No new API —
+    # midpoints come straight off the scanner-cached _market dicts.
+    if _flip_enabled():
+        for c in all_candidates:
+            m = c.get("_market") or {}
+            mid = m.get("price")
+            mid_id = m.get("id")
+            if mid is None or not mid_id:
+                continue
+            event = _flip_detector.observe(mid_id, float(mid))
+            if event:
+                try:
+                    db.write_flip_event({
+                        "detected_at":    datetime.now(timezone.utc).isoformat(),
+                        "market_id":      mid_id,
+                        "city":           c.get("city"),
+                        "direction":      event["direction"],
+                        "price_before":   event["price_before"],
+                        "price_after":    event["price_after"],
+                        "delta_pct":      event["delta_pct"],
+                        "minutes_window": event["minutes_window"],
+                        "poll_tick_id":   None,
+                    })
+                    print(
+                        f"  [flip] {(c.get('city_display') or c.get('city') or '?'):<16} "
+                        f"{event['direction']:<8}  {event['price_before']:.0%} -> {event['price_after']:.0%}  "
+                        f"({event['delta_pct']:+.0%} in {event['minutes_window']:.0f}min)"
+                    )
+                except Exception as e:
+                    print(f"[flip_detector] write failed market={mid_id}: {e}")
 
     # Strip markets already entered this session
     candidates = [c for c in all_candidates if c["_market"]["id"] not in already_traded]
