@@ -36,6 +36,9 @@ research_db/
 # ── Scratch downloads (HF probes, ad-hoc dumps) ──────────────────────────────
 _scratch/
 
+# ── Script run artifacts (CSV outputs, local-only) ───────────────────────────
+scripts/_out_*
+
 # ── Runtime state ────────────────────────────────────────────────────────────
 discovery_last_run.txt
 heartbeat.json
