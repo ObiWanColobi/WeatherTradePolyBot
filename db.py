@@ -1220,20 +1220,23 @@ def save_forecast_cache(city_key: str, ts: float, forecast: list, ensemble: list
         """, (city_key, ts, json.dumps(forecast), json.dumps(ensemble)))
 
 
-def save_ensemble_history(city: str, ensemble: list, captured_ts: float | None = None) -> None:
+def save_ensemble_history(city: str, ensemble: list, captured_ts: float | None = None) -> int:
     """Phase2-04: append one row per (city, init_date=today, target_date)
     for each day in the ensemble. INSERT OR IGNORE keeps first-of-day-wins
-    so bot tick chatter doesn't churn rows.
+    so bot tick chatter doesn't churn rows. Returns the number of rows
+    actually inserted (0 if all conflicted or nothing to insert) for
+    observability — log on first insert per session so we can verify the
+    sidecar is firing without watching the table grow.
     """
     if not ensemble:
-        return
+        return 0
     if captured_ts is None:
         captured_ts = datetime.now(timezone.utc).timestamp()
     init_date_str = datetime.fromtimestamp(captured_ts, tz=timezone.utc).strftime("%Y-%m-%d")
     captured_iso  = datetime.fromtimestamp(captured_ts, tz=timezone.utc).isoformat()
     city_norm = (city or "").strip().lower()
     if not city_norm:
-        return
+        return 0
     rows = []
     for day in ensemble:
         target = day.get("date")
@@ -1242,13 +1245,14 @@ def save_ensemble_history(city: str, ensemble: list, captured_ts: float | None =
             continue
         rows.append((city_norm, init_date_str, target, json.dumps(members), captured_iso))
     if not rows:
-        return
+        return 0
     with get_conn() as conn:
-        conn.executemany("""
+        cur = conn.executemany("""
             INSERT OR IGNORE INTO weather_ensemble_history
                 (city, init_date, target_date, member_temps, captured_at)
             VALUES (?, ?, ?, ?, ?)
         """, rows)
+        return cur.rowcount or 0
 
 
 def get_ensemble_init(city: str, init_date: str, target_date: str) -> list[float] | None:

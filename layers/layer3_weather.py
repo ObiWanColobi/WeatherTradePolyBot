@@ -256,7 +256,9 @@ def get_city_forecast(city_key: str, coords: dict, max_age: float | None = None)
     # Phase2-04: sidecar history for trajectory backfill (INSERT OR IGNORE,
     # first-of-day wins per (city, init_date, target_date)).
     try:
-        db.save_ensemble_history(city_key, ensemble, captured_ts=now)
+        n_inserted = db.save_ensemble_history(city_key, ensemble, captured_ts=now)
+        if n_inserted:
+            print(f"[weather] sidecar history +{n_inserted} rows city={city_key}")
     except Exception as e:
         print(f"[weather] save_ensemble_history failed city={city_key}: {e}")
     return entry

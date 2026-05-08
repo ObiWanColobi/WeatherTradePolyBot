@@ -28,9 +28,14 @@ from dataclasses import dataclass, field
 from config import WEATHER
 import db
 from markets.polymarket import simulate_fill
-from markets.open_meteo import get_deterministic_per_model
+from markets.open_meteo import get_deterministic_per_model, get_ensemble_forecasts
 from markets.polymarket import get_trade_velocity
-from layers.layer3_weather import CITY_COORDS, get_cached_member_temps, parse_threshold_c
+from layers.layer3_weather import (
+    CITY_COORDS,
+    get_cached_member_temps,
+    parse_threshold_c,
+    find_ensemble_day,
+)
 from weather_entry import check_entry
 from datetime import datetime, timezone, timedelta
 from weather_sizing import kelly_size_with_diagnostics
@@ -550,8 +555,29 @@ def _write_phase2_snapshot(
 
         src_tag = "live-forecast/icon_seamless+gfs_seamless"
 
-    # Phase2-02: ensemble spread from layer3 cache (no new API call).
-    spread = _ensemble_spread_stats(get_cached_member_temps(city, res_date))
+    # Phase2-02: ensemble spread. Try the layer3 cache first (free); fall
+    # back to a fresh ensemble fetch if the cache is cold for this city/date
+    # (happens on the first sized decision after a bot restart, before the
+    # scan loop has refetched ensemble data for this city). Cost: at most
+    # one ensemble call per cold-cache approved trade — well under budget.
+    member_temps = get_cached_member_temps(city, res_date)
+    if not member_temps and coords:
+        try:
+            fresh_ensemble = get_ensemble_forecasts(
+                coords["lat"], coords["lon"], coords.get("tz", "auto"),
+            )
+            member_temps = find_ensemble_day(fresh_ensemble, res_date)
+            if member_temps:
+                # Seed sidecar history with this fresh data so the trajectory
+                # backfill kicks in for this city without waiting for scan TTL.
+                try:
+                    db.save_ensemble_history(city, fresh_ensemble)
+                except Exception as e:
+                    print(f"[decision] phase2 sidecar seed failed city={city}: {e}")
+                print(f"[decision] phase2 ensemble fallback fetch city={city} target={res_date}")
+        except Exception as e:
+            print(f"[decision] phase2 ensemble fallback fetch failed city={city}: {e}")
+    spread = _ensemble_spread_stats(member_temps)
 
     # E4-05: prev-day same-city resolution outcome (DB read, no API call).
     prev_outcome:  str | None = None
