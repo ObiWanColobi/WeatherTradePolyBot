@@ -349,6 +349,18 @@ def init_db():
         _safe_add_column(conn, "decision_snapshots", "trades_per_min_30", "REAL")
         _safe_add_column(conn, "decision_snapshots", "trades_per_min_60", "REAL")
 
+        # E15.3-01 + E6-02 (2026-05-08): derived flags on sizing_decisions for
+        # live-debug scannability. traj_regime_flag fires when D-5..D-1 drift
+        # is consistent and within max-step. direction_agreement_flag fires
+        # when calibrated GEFS-31 and the city's best deterministic model
+        # point the same way relative to the threshold.
+        _safe_add_column(conn, "sizing_decisions", "traj_regime_flag",        "INTEGER")
+        _safe_add_column(conn, "sizing_decisions", "direction_agreement_flag","INTEGER")
+
+        # E6-02 raw underlying data (kept on the snapshot side).
+        _safe_add_column(conn, "decision_snapshots", "det_best_temp_c", "REAL")
+        _safe_add_column(conn, "decision_snapshots", "det_best_model",  "TEXT")
+
         # Phase2-04 (2026-05-08): multi-init GEFS-31 trajectory (D-5..D-1).
         # init_d{N} is ensemble mean as of N days before the market's
         # resolution date; spread_d{N} is the standard deviation. Filled
@@ -1611,6 +1623,20 @@ def link_sizing_decision_to_trade(sizing_id: int, trade_id: int) -> None:
         conn.execute(
             "UPDATE sizing_decisions SET trade_id = ? WHERE id = ?",
             (trade_id, sizing_id),
+        )
+
+
+def update_sizing_decision_flags(sizing_id: int, flags: dict) -> None:
+    """Phase 2 derived flags (E15.3-01, E6-02). Caller passes only the
+    column/value pairs it wants to update — silently no-op on empty.
+    """
+    if not flags:
+        return
+    set_clause = ", ".join(f"{k} = ?" for k in flags.keys())
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE sizing_decisions SET {set_clause} WHERE id = ?",
+            [*flags.values(), sizing_id],
         )
 
 

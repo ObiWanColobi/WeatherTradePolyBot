@@ -30,7 +30,7 @@ import db
 from markets.polymarket import simulate_fill
 from markets.open_meteo import get_deterministic_per_model
 from markets.polymarket import get_trade_velocity
-from layers.layer3_weather import CITY_COORDS, get_cached_member_temps
+from layers.layer3_weather import CITY_COORDS, get_cached_member_temps, parse_threshold_c
 from weather_entry import check_entry
 from datetime import datetime, timezone, timedelta
 from weather_sizing import kelly_size_with_diagnostics
@@ -343,7 +343,11 @@ def evaluate(
         # on intraday calls, so seamless models suffice.
         if sizing_id is not None:
             try:
-                _write_phase2_snapshot(sizing_id, city, res_date, market_id)
+                _write_phase2_snapshot(
+                    sizing_id, city, res_date, market_id,
+                    target_str=scan_data.get("target_str"),
+                    calibrated_prob=mdl_prob,
+                )
             except Exception as e:
                 print(f"[decision] phase2 snapshot failed sizing_id={sizing_id}: {e}")
 
@@ -369,6 +373,71 @@ def _temp_for_date(forecast: list[dict], target_date: str) -> float | None:
             t = entry.get("temp_max_c")
             return float(t) if t is not None else None
     return None
+
+
+# E6-02 (2026-05-08): per-city deterministic best from E3 findings.
+# ICON wins for HK / Tel Aviv / Buenos Aires / Denver / Beijing / Istanbul;
+# GFS wins for Shanghai / Paris / Chicago. Default ICON for unmapped cities
+# (matches the global E3 finding that ICON edges GFS overall).
+_DET_BEST_MODEL: dict[str, str] = {
+    "hong kong":     "icon",
+    "tel aviv":      "icon",
+    "buenos aires":  "icon",
+    "denver":        "icon",
+    "beijing":       "icon",
+    "istanbul":      "icon",
+    "shanghai":      "gfs",
+    "paris":         "gfs",
+    "chicago":       "gfs",
+}
+
+
+def _traj_regime_flag(traj: dict) -> int | None:
+    """E15.3-01 — fire when D-5..D-1 drift is consistent and within bounds.
+    Spec: |drift| >= 1.0°C, monotone direction across all 4 deltas, and
+    max single-step change < 2.0°C. Returns None if any of D-5..D-1 is
+    missing (cannot evaluate).
+    """
+    inits = [traj.get(f"traj_init_d{n}") for n in (5, 4, 3, 2, 1)]
+    if any(v is None for v in inits):
+        return None
+    drift = inits[-1] - inits[0]
+    if abs(drift) < 1.0:
+        return 0
+    deltas = [inits[i + 1] - inits[i] for i in range(4)]
+    # "direction-consistent" admits flat steps; only sign reversals violate.
+    if not all(d >= 0 for d in deltas) and not all(d <= 0 for d in deltas):
+        return 0
+    max_step = max(abs(d) for d in deltas)
+    if max_step >= 2.0:
+        return 0
+    return 1
+
+
+def _direction_agreement(
+    city:           str,
+    icon_temp:      float | None,
+    gfs_temp:       float | None,
+    threshold_c:    float | None,
+    threshold_op:   str | None,
+    calibrated_p:   float | None,
+) -> tuple[int | None, float | None, str | None]:
+    """E6-02 — pick the city's best deterministic temp (per E3 mapping),
+    derive its YES/NO call vs the threshold, and check whether calibrated
+    GEFS-31 agrees. Returns (flag, det_best_temp_c, det_best_model). Flag
+    is 1 if both point the same direction, 0 if disagree, None if any
+    input is missing.
+    """
+    best_model = _DET_BEST_MODEL.get(city.lower(), "icon")
+    best_temp  = icon_temp if best_model == "icon" else gfs_temp
+    if best_temp is None or threshold_c is None or calibrated_p is None or threshold_op not in (">=", "<="):
+        return None, best_temp, best_model
+
+    # Deterministic call: would this market resolve YES given det best?
+    det_yes = (best_temp >= threshold_c) if threshold_op == ">=" else (best_temp <= threshold_c)
+    # Calibrated GEFS-31 call: same question via probability
+    cal_yes = calibrated_p >= 0.5
+    return (1 if det_yes == cal_yes else 0), best_temp, best_model
 
 
 def _trajectory_stats(city: str, res_date: str) -> dict:
@@ -433,11 +502,20 @@ def _ensemble_spread_stats(member_temps: list[float] | None) -> dict:
     return out
 
 
-def _write_phase2_snapshot(sizing_id: int, city: str, res_date: str, market_id: str = "") -> None:
+def _write_phase2_snapshot(
+    sizing_id:        int,
+    city:             str,
+    res_date:         str,
+    market_id:        str = "",
+    target_str:       str | None = None,
+    calibrated_prob:  float | None = None,
+) -> None:
     """Phase2 shadow capture: deterministic ICON + GFS, ensemble spread,
-    prev-day same-city outcome, and Polymarket trade velocity at decision
-    time. Always inserts a row keyed on `sizing_id`; NULLs are themselves
-    useful for coverage analysis.
+    prev-day same-city outcome, Polymarket trade velocity, multi-init
+    GEFS-31 trajectory, and derived flags (E15.3-01 + E6-02). Always
+    inserts one decision_snapshots row keyed on `sizing_id`; NULLs are
+    themselves useful for coverage analysis. Updates the matching
+    sizing_decisions row with the two derived boolean flags.
     """
     coords = CITY_COORDS.get(city)
     icon_temp: float | None = None
@@ -504,6 +582,20 @@ def _write_phase2_snapshot(sizing_id: int, city: str, res_date: str, market_id: 
         except Exception as e:
             print(f"[decision] phase2 trade-velocity failed market={market_id}: {e}")
 
+    # E15.3-01: trajectory regime flag from D-5..D-1 inits.
+    traj_regime = _traj_regime_flag(traj_stats)
+
+    # E6-02: direction agreement between best deterministic and calibrated GEFS.
+    threshold_c:  float | None = None
+    threshold_op: str   | None = None
+    if target_str:
+        parsed = parse_threshold_c(target_str)
+        if parsed:
+            threshold_op, threshold_c = parsed
+    dir_agree, det_best_temp, det_best_model = _direction_agreement(
+        city, icon_temp, gfs_temp, threshold_c, threshold_op, calibrated_prob,
+    )
+
     db.write_decision_snapshot({
         "sizing_decision_id": sizing_id,
         "captured_at":        datetime.now(timezone.utc).isoformat(),
@@ -514,9 +606,23 @@ def _write_phase2_snapshot(sizing_id: int, city: str, res_date: str, market_id: 
         "prev_day_question":  prev_question,
         "trades_per_min_30":  tpm_30,
         "trades_per_min_60":  tpm_60,
+        "det_best_temp_c":    det_best_temp,
+        "det_best_model":     det_best_model,
         **spread,
         **traj_stats,
     })
+
+    # Update sizing_decisions with the two derived flags (live-debug scannability).
+    flag_updates: dict = {}
+    if traj_regime is not None:
+        flag_updates["traj_regime_flag"] = traj_regime
+    if dir_agree is not None:
+        flag_updates["direction_agreement_flag"] = dir_agree
+    if flag_updates:
+        try:
+            db.update_sizing_decision_flags(sizing_id, flag_updates)
+        except Exception as e:
+            print(f"[decision] phase2 flag update failed sizing_id={sizing_id}: {e}")
 
 
 def print_audit(results: list[DecisionResult]):
