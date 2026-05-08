@@ -173,8 +173,8 @@ WEATHER = {
     # ║  These REPLACE the paper defaults above when running with real money.   ║
     # ║  More conservative caps to limit downside while validating the system.  ║
     # ╚═══════════════════════════════════════════════════════════════════════════╝
-    "live_kelly_max_bet_usdc":           50.00,   # overrides kelly_max_bet_usdc ($15 vs $200 paper)
-    "live_kelly_max_bet_usdc_unanimous": 75.00,   # overrides kelly_max_bet_usdc_unanimous ($10 vs $50 paper)
+    "live_kelly_max_bet_usdc":           50.00,   # overrides kelly_max_bet_usdc (paper $15 → live $50)
+    "live_kelly_max_bet_usdc_unanimous": 75.00,   # overrides kelly_max_bet_usdc_unanimous (paper $50 → live $75)
     "live_risk_daily_loss_limit_pct":     0.10,   # overrides risk_daily_loss_limit_pct (same for now, tighten as needed)
     "live_risk_auto_reset":              True,   # overrides risk_auto_reset — (False = manual override only, no midnight reset)
 
