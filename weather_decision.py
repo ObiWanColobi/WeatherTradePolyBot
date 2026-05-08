@@ -29,7 +29,7 @@ from config import WEATHER
 import db
 from markets.polymarket import simulate_fill
 from markets.open_meteo import get_deterministic_per_model
-from layers.layer3_weather import CITY_COORDS
+from layers.layer3_weather import CITY_COORDS, get_cached_member_temps
 from weather_entry import check_entry
 from datetime import datetime, timezone
 from weather_sizing import kelly_size_with_diagnostics
@@ -370,6 +370,39 @@ def _temp_for_date(forecast: list[dict], target_date: str) -> float | None:
     return None
 
 
+def _ensemble_spread_stats(member_temps: list[float] | None) -> dict:
+    """Phase2-02: std / IQR / p05 / p95 for a list of GEFS-31 member temps.
+    Needs >=3 members; returns all-NULL otherwise. NumPy-free for
+    light-runtime hosts — uses sorted-list percentile interpolation.
+    """
+    out = {"ens_std": None, "ens_iqr": None, "ens_p05": None, "ens_p95": None}
+    if not member_temps or len(member_temps) < 3:
+        return out
+
+    n = len(member_temps)
+    mean_c = sum(member_temps) / n
+    variance = sum((t - mean_c) ** 2 for t in member_temps) / n
+    out["ens_std"] = variance ** 0.5
+
+    sorted_t = sorted(member_temps)
+
+    def _pct(p: float) -> float:
+        idx = p * (n - 1)
+        lo  = int(idx)
+        hi  = min(lo + 1, n - 1)
+        frac = idx - lo
+        return sorted_t[lo] + (sorted_t[hi] - sorted_t[lo]) * frac
+
+    p05 = _pct(0.05)
+    p25 = _pct(0.25)
+    p75 = _pct(0.75)
+    p95 = _pct(0.95)
+    out["ens_p05"] = p05
+    out["ens_p95"] = p95
+    out["ens_iqr"] = p75 - p25
+    return out
+
+
 def _write_phase2_snapshot(sizing_id: int, city: str, res_date: str) -> None:
     """Phase2-01 capture: deterministic ICON + GFS at decision time.
 
@@ -410,12 +443,16 @@ def _write_phase2_snapshot(sizing_id: int, city: str, res_date: str) -> None:
 
         src_tag = "live-forecast/icon_seamless+gfs_seamless"
 
+    # Phase2-02: ensemble spread from layer3 cache (no new API call).
+    spread = _ensemble_spread_stats(get_cached_member_temps(city, res_date))
+
     db.write_decision_snapshot({
         "sizing_decision_id": sizing_id,
         "captured_at":        datetime.now(timezone.utc).isoformat(),
         "det_icon_temp_c":    icon_temp,
         "det_gfs_temp_c":     gfs_temp,
         "det_source_tag":     src_tag,
+        **spread,
     })
 
 

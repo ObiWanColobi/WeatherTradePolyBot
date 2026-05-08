@@ -291,6 +291,20 @@ def find_ensemble_day(ensemble: list[dict], target_date: str) -> list[float] | N
     return None
 
 
+def get_cached_member_temps(city: str, target_date: str) -> list[float] | None:
+    """Phase2-02: read GEFS-31 member temps for a specific date from the
+    layer3 cache. Pure read — never triggers an Open-Meteo fetch. Returns
+    None if no cached entry, no ensemble, or target_date outside window.
+    """
+    entry = _cache.get(city.lower())
+    if not entry:
+        return None
+    ensemble = entry.get("ensemble", [])
+    if not ensemble:
+        return None
+    return find_ensemble_day(ensemble, target_date)
+
+
 # ── Shared threshold parser (used by weather_exit and metar_observer) ─────────
 
 _COMPACT_THRESH_RE = re.compile(

@@ -326,6 +326,15 @@ def init_db():
         _safe_add_column(conn, "sizing_decisions", "calibrated_prob",       "REAL")
         _safe_add_column(conn, "sizing_decisions", "fixed_mode_stake_usdc", "REAL")
 
+        # Phase2-02 (2026-05-08): GEFS-31 ensemble spread at decision time.
+        # Derived from existing ensemble fetch (no new API calls) — std,
+        # interquartile range, and 5/95 percentile bounds for the market's
+        # resolution date.
+        _safe_add_column(conn, "decision_snapshots", "ens_std", "REAL")
+        _safe_add_column(conn, "decision_snapshots", "ens_iqr", "REAL")
+        _safe_add_column(conn, "decision_snapshots", "ens_p05", "REAL")
+        _safe_add_column(conn, "decision_snapshots", "ens_p95", "REAL")
+
         # Backfill hours_to_close for trades that predate this column
         conn.executescript("""
             UPDATE trades
