@@ -54,6 +54,8 @@ WEATHER = {
         "hong kong", "toronto", "seoul", "buenos aires", "chicago",
         "miami", "moscow", "madrid", "munich", "wellington",
         "atlanta", "sao paulo", "tel aviv", "lucknow", "shanghai",
+        # E12-01 additions (2026-05-08): full-stake unlock.
+        "taipei", "ankara", "tokyo", "seattle",
     ],
 
     # Top N markets the bot will actually evaluate for trades.

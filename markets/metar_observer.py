@@ -45,6 +45,11 @@ CITY_RESOLVERS: dict[str, dict] = {
     "lucknow":        {"icao": "VILK", "src": "avwx", "tz": "Asia/Kolkata"},
     "shanghai":       {"icao": "ZSPD", "src": "avwx", "tz": "Asia/Shanghai"},
     "beijing":        {"icao": "ZBAA", "src": "avwx", "tz": "Asia/Shanghai"},
+    # E12-01 additions (2026-05-08): user-verified ICAOs for shadow-capture coverage.
+    "taipei":         {"icao": "RCSS", "src": "avwx", "tz": "Asia/Taipei"},
+    "ankara":         {"icao": "LTAC", "src": "avwx", "tz": "Europe/Istanbul"},
+    "tokyo":          {"icao": "RJTT", "src": "avwx", "tz": "Asia/Tokyo"},
+    "seattle":        {"icao": "KSEA", "src": "avwx", "tz": "America/Los_Angeles"},
 }
 
 # ── Module-level config (read once at import to avoid per-call dict lookup) ──

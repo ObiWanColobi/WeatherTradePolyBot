@@ -52,6 +52,7 @@ CITY_COORDS: dict[str, dict] = {
     "melbourne":        {"lat": -37.8136, "lon":  144.9631, "tz": "Australia/Melbourne"},
     "bangkok":          {"lat":  13.7563, "lon":  100.5018, "tz": "Asia/Bangkok"},
     "seoul":            {"lat":  37.5665, "lon":  126.9780, "tz": "Asia/Seoul"},
+    "taipei":           {"lat":  25.0330, "lon":  121.5654, "tz": "Asia/Taipei"},
     "jakarta":          {"lat":  -6.2088, "lon":  106.8456, "tz": "Asia/Jakarta"},
     "istanbul":         {"lat":  41.0082, "lon":   28.9784, "tz": "Europe/Istanbul"},
     "cairo":            {"lat":  30.0444, "lon":   31.2357, "tz": "Africa/Cairo"},
