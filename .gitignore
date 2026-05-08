@@ -24,8 +24,6 @@ venv/
 
 # ── Internal planning / AI notes ─────────────────────────────────────────────
 tasks/
-!tasks/lessons.md
-!tasks/todo.md
 TradeBot_UserNotes.md
 docs/superpowers/
 
