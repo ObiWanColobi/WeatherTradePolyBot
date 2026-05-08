@@ -32,6 +32,12 @@ docs/superpowers/
 # ── Local-only reports ───────────────────────────────────────────────────────
 Bot_reports/
 
+# ── Research DB (local-only, see tasks/plans/2026-05-04_d0_subplan_unified_db.md) ──
+research_db/
+
+# ── Scratch downloads (HF probes, ad-hoc dumps) ──────────────────────────────
+_scratch/
+
 # ── Runtime state ────────────────────────────────────────────────────────────
 discovery_last_run.txt
 heartbeat.json
