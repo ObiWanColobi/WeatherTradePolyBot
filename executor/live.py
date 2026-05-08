@@ -518,8 +518,10 @@ class LiveExecutor(BaseExecutor):
 
     def _cancel_order(self, order_id: str):
         """Cancel an open order. Best-effort — logs but doesn't raise."""
+        # V2 SDK has no per-order .cancel(). cancel_orders takes a list of
+        # order hash strings; cancel_order takes an OrderPayload wrapper.
         try:
-            self._client.cancel(order_id)
+            self._client.cancel_orders([order_id])
             print(f"[live] Cancelled order {order_id[:12]}")
         except Exception as e:
             print(f"[live] Cancel failed for {order_id[:12]}: {e}")
