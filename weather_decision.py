@@ -29,6 +29,7 @@ from config import WEATHER
 import db
 from markets.polymarket import simulate_fill
 from markets.open_meteo import get_deterministic_per_model
+from markets.polymarket import get_trade_velocity
 from layers.layer3_weather import CITY_COORDS, get_cached_member_temps
 from weather_entry import check_entry
 from datetime import datetime, timezone
@@ -342,7 +343,7 @@ def evaluate(
         # on intraday calls, so seamless models suffice.
         if sizing_id is not None:
             try:
-                _write_phase2_snapshot(sizing_id, city, res_date)
+                _write_phase2_snapshot(sizing_id, city, res_date, market_id)
             except Exception as e:
                 print(f"[decision] phase2 snapshot failed sizing_id={sizing_id}: {e}")
 
@@ -403,12 +404,11 @@ def _ensemble_spread_stats(member_temps: list[float] | None) -> dict:
     return out
 
 
-def _write_phase2_snapshot(sizing_id: int, city: str, res_date: str) -> None:
-    """Phase2-01 capture: deterministic ICON + GFS at decision time.
-
-    Always inserts a row keyed on `sizing_id`. NULL temps mean either the
-    OM call failed or the city is missing from CITY_COORDS — in both cases
-    the row's existence is itself useful for coverage analysis.
+def _write_phase2_snapshot(sizing_id: int, city: str, res_date: str, market_id: str = "") -> None:
+    """Phase2 shadow capture: deterministic ICON + GFS, ensemble spread,
+    prev-day same-city outcome, and Polymarket trade velocity at decision
+    time. Always inserts a row keyed on `sizing_id`; NULLs are themselves
+    useful for coverage analysis.
     """
     coords = CITY_COORDS.get(city)
     icon_temp: float | None = None
@@ -457,6 +457,19 @@ def _write_phase2_snapshot(sizing_id: int, city: str, res_date: str) -> None:
     except Exception as e:
         print(f"[decision] phase2 prev-day lookup failed city={city}: {e}")
 
+    # Phase2-05: Polymarket trade velocity (gamma /trades). One fetch per
+    # approved trade — the write_sizing_decision gate naturally throttles
+    # this to actual trade rate.
+    tpm_30: float | None = None
+    tpm_60: float | None = None
+    if market_id:
+        try:
+            vel = get_trade_velocity(market_id)
+            tpm_30 = vel.get("trades_per_min_30")
+            tpm_60 = vel.get("trades_per_min_60")
+        except Exception as e:
+            print(f"[decision] phase2 trade-velocity failed market={market_id}: {e}")
+
     db.write_decision_snapshot({
         "sizing_decision_id": sizing_id,
         "captured_at":        datetime.now(timezone.utc).isoformat(),
@@ -465,6 +478,8 @@ def _write_phase2_snapshot(sizing_id: int, city: str, res_date: str) -> None:
         "det_source_tag":     src_tag,
         "prev_day_outcome":   prev_outcome,
         "prev_day_question":  prev_question,
+        "trades_per_min_30":  tpm_30,
+        "trades_per_min_60":  tpm_60,
         **spread,
     })
 

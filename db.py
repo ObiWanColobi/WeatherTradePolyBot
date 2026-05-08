@@ -342,6 +342,13 @@ def init_db():
         _safe_add_column(conn, "decision_snapshots", "prev_day_outcome",  "TEXT")
         _safe_add_column(conn, "decision_snapshots", "prev_day_question", "TEXT")
 
+        # Phase2-05 (2026-05-08): Polymarket trade velocity at decision time.
+        # Counts /trades hits in last 30/60 min. Only fetched for fully-approved
+        # candidates (write_sizing_decision-gated) so live API budget is bounded
+        # at ~bot-trade-rate, not scan-rate.
+        _safe_add_column(conn, "decision_snapshots", "trades_per_min_30", "REAL")
+        _safe_add_column(conn, "decision_snapshots", "trades_per_min_60", "REAL")
+
         # Phase2-06 (2026-05-08): live flip detector. Shadow-only; piggybacks
         # on the 60s scanner tick. Each row is one detected price-flip event
         # for downstream Phase 3 NO-flip continuation gate (E2-02).

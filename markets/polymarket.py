@@ -224,6 +224,55 @@ def get_market_trades(condition_id: str, limit: int = 500) -> list[dict]:
     return result
 
 
+# Phase2-05: per-market trade-velocity cache. TTL keeps redundant fetches off
+# the gamma /trades endpoint when multiple downstream callers (decision +
+# future Phase 3 gate) hit the same market within seconds.
+_VELOCITY_CACHE: dict[str, tuple[float, dict]] = {}
+_VELOCITY_TTL_SEC = 45.0
+
+
+def get_trade_velocity(condition_id: str, limit: int = 500) -> dict:
+    """Phase2-05: trades-per-minute over the last 30 and 60 minutes for a
+    given market. Returns
+        {"trades_per_min_30": float, "trades_per_min_60": float, "n_60": int}.
+    Empty fetch -> all-zero dict (NOT NULL — zero velocity is a valid datum).
+
+    Cached for `_VELOCITY_TTL_SEC` so repeat callers within the same decision
+    pass don't double-fetch. Caller decides whether to use the value (e.g.
+    skip if `n_60` is 0 because the API returned nothing).
+    """
+    import time as _time
+    now_ts = _time.time()
+
+    cached = _VELOCITY_CACHE.get(condition_id)
+    if cached and (now_ts - cached[0]) < _VELOCITY_TTL_SEC:
+        return cached[1]
+
+    trades = get_market_trades(condition_id, limit=limit)
+
+    cutoff_30 = now_ts - 30 * 60
+    cutoff_60 = now_ts - 60 * 60
+    n_30 = 0
+    n_60 = 0
+    for t in trades:
+        try:
+            ts = float(t.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            continue
+        if ts >= cutoff_60:
+            n_60 += 1
+            if ts >= cutoff_30:
+                n_30 += 1
+
+    out = {
+        "trades_per_min_30": n_30 / 30.0,
+        "trades_per_min_60": n_60 / 60.0,
+        "n_60":              n_60,
+    }
+    _VELOCITY_CACHE[condition_id] = (now_ts, out)
+    return out
+
+
 def get_wallet_activity(address: str, limit: int = 100, offset: int = 0) -> list[dict]:
     """
     Fetch trade activity for a wallet across all markets via the Data API.
