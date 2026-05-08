@@ -302,6 +302,15 @@ def init_db():
         _safe_add_column(conn, "trades", "exit_order_price",     "REAL")
         _safe_add_column(conn, "trades", "exit_order_placed_at", "TEXT")
 
+        # E1-06 (2026-05-08) — calibration + dual-mode stake logging.
+        # raw_prob and calibrated_prob are equal until Phase 3 ships per-city Platt
+        # calibration; columns exist now so downstream code can write divergent
+        # values without another migration. fixed_mode_stake_usdc records what a
+        # flat-stake reference (the E15.4 fixed_50 baseline) would have wagered.
+        _safe_add_column(conn, "sizing_decisions", "raw_prob",              "REAL")
+        _safe_add_column(conn, "sizing_decisions", "calibrated_prob",       "REAL")
+        _safe_add_column(conn, "sizing_decisions", "fixed_mode_stake_usdc", "REAL")
+
         # Backfill hours_to_close for trades that predate this column
         conn.executescript("""
             UPDATE trades

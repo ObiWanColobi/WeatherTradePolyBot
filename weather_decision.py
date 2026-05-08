@@ -306,6 +306,10 @@ def evaluate(
         provisional_exposure += size
 
         unanimous_tag = " [unanimous]" if is_unanimous else ""
+        # E1-06: log raw + calibrated probability separately + fixed-mode reference.
+        # Until Phase 3 Platt calibration ships, raw_prob == calibrated_prob == model_prob.
+        # fixed_mode_stake_usdc is the E15.4 fixed_50 baseline, captured for later
+        # Kelly-vs-fixed-stake research on real trade outcomes.
         try:
             db.write_sizing_decision({
                 "recorded_at":         datetime.now(timezone.utc).isoformat(),
@@ -320,8 +324,11 @@ def evaluate(
                     "margin_mult", "kelly_fraction", "kelly_final", "size_pre_cap",
                     "cap_per_bet", "cap_balance_pct", "size_after_caps", "binding_constraint",
                 )},
-                "slippage_reduced_to": slippage_reduced_to,
-                "final_size":          size,
+                "slippage_reduced_to":    slippage_reduced_to,
+                "final_size":             size,
+                "raw_prob":               mdl_prob,
+                "calibrated_prob":        mdl_prob,
+                "fixed_mode_stake_usdc":  50.0,
             })
         except Exception as e:
             print(f"[decision] sizing_decision write failed: {e}")
