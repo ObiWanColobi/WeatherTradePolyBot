@@ -596,8 +596,10 @@ def run(dry_run: bool = False):
     print("[bot] Running catalog snapshot...")
     try:
         weather_catalog.run_snapshot()
+        weather_catalog.backfill_resolutions()
     except Exception as e:
         print(f"[bot] Catalog snapshot failed (non-fatal): {e}")
+    _last_catalog_date = datetime.now(timezone.utc).date().isoformat()
 
     # Initial layer refresh (loads top-N market IDs + clears forecast cache)
     print("[bot] Refreshing weather layer...")
@@ -612,6 +614,17 @@ def run(dry_run: bool = False):
 
     while True:
         poll += 1
+        # Daily UTC rollover — run a fresh catalog snapshot + resolution backfill
+        # so weather_city_log accumulates without requiring a bot restart.
+        _today_utc = datetime.now(timezone.utc).date().isoformat()
+        if _today_utc != _last_catalog_date:
+            print(f"[bot] UTC day rollover ({_last_catalog_date} → {_today_utc}) — refreshing catalog")
+            try:
+                weather_catalog.run_snapshot()
+                weather_catalog.backfill_resolutions()
+            except Exception as e:
+                print(f"[bot] Daily catalog pass failed (non-fatal): {e}")
+            _last_catalog_date = _today_utc
         now_str = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
         print(f"\n{'─' * 60}")
         _cur_open     = db.get_open_trades()

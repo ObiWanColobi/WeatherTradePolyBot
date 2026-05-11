@@ -23,6 +23,7 @@ import requests
 import db
 from layers.layer3_weather import WeatherLayer
 from config import WEATHER
+from markets.polymarket import get_resolution_status
 
 _session = requests.Session()
 _session.headers.update({"User-Agent": "weather-catalog/1.0"})
@@ -145,6 +146,7 @@ def run_snapshot() -> int:
             "ensemble_pct": ens_pct,
             "ensemble_n":   ens_n,
             "logged_at":    logged_at,
+            "condition_id": market.get("id"),
         }
 
         db.upsert_city_log(entry)
@@ -152,6 +154,73 @@ def run_snapshot() -> int:
 
     print(f"[catalog] Done — {written} rows written, {skipped} skipped.")
     return written
+
+
+# ── Resolution backfill ───────────────────────────────────────────────────────
+
+def backfill_resolutions(lookback_days: int = 14) -> dict:
+    """Fill resolved_yes on past-day weather_city_log rows that have a
+    condition_id. Calls CLOB /markets/<condition_id> per row; cheap because
+    catalog rows are ~few-hundred and most resolve once then never re-checked.
+
+    Skips rows where condition_id is NULL (pre-2026-05-11 historical rows).
+    Skips rows whose markets aren't yet resolved (price mid-range).
+    """
+    db.init_db()
+
+    with db.get_conn() as conn:
+        rows = conn.execute(f"""
+            SELECT logged_date, city, threshold, condition_id
+              FROM weather_city_log
+             WHERE resolved_yes IS NULL
+               AND condition_id IS NOT NULL
+               AND logged_date <  DATE('now')
+               AND logged_date >= DATE('now', '-{int(lookback_days)} days')
+        """).fetchall()
+
+    if not rows:
+        print("[catalog] resolution backfill — nothing to do.")
+        return {"updated": 0, "pending": 0, "errors": 0}
+
+    updated = 0
+    pending = 0
+    errors  = 0
+
+    for row in rows:
+        try:
+            res = get_resolution_status(row["condition_id"])
+        except Exception as e:
+            print(f"[catalog] backfill exception for {row['city']}/{row['logged_date']}: {e}")
+            errors += 1
+            continue
+
+        if res is None:
+            errors += 1
+            continue
+        if not res.get("resolved"):
+            pending += 1
+            continue
+
+        yes_price = res.get("yes_price")
+        if yes_price is None:
+            pending += 1
+            continue
+        if yes_price >= 0.98:
+            resolved_yes_bool = True
+        elif yes_price <= 0.02:
+            resolved_yes_bool = False
+        else:
+            pending += 1
+            continue
+
+        db.mark_city_log_resolved(
+            row["logged_date"], row["city"], row["threshold"], resolved_yes_bool
+        )
+        updated += 1
+
+    print(f"[catalog] resolution backfill — {updated} updated, "
+          f"{pending} still-pending, {errors} errors (scanned {len(rows)}).")
+    return {"updated": updated, "pending": pending, "errors": errors}
 
 
 # ── Report ────────────────────────────────────────────────────────────────────

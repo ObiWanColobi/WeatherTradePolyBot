@@ -408,6 +408,12 @@ def init_db():
                 ON flip_events(city, detected_at DESC);
         """)
 
+        # 2026-05-11: link weather_city_log rows to gamma condition_id so
+        # weather_catalog.backfill_resolutions() can look up settlement and
+        # populate resolved_yes. Pre-2026-05-11 rows lack condition_id and
+        # remain unresolvable; new rows fill in going forward.
+        _safe_add_column(conn, "weather_city_log", "condition_id", "TEXT")
+
         # Backfill hours_to_close for trades that predate this column
         conn.executescript("""
             UPDATE trades
@@ -892,20 +898,24 @@ def upsert_city_log(entry: dict):
     Unique on (logged_date, city, threshold) — safe to call multiple times per day.
     """
     entry = _norm_city(entry)
+    entry.setdefault("condition_id", None)
     with get_conn() as conn:
         conn.execute("""
             INSERT INTO weather_city_log
                 (logged_date, city, market_type, threshold, volume_24h,
-                 yes_price, model_prob, ensemble_pct, ensemble_n, logged_at)
+                 yes_price, model_prob, ensemble_pct, ensemble_n, logged_at,
+                 condition_id)
             VALUES (:logged_date, :city, :market_type, :threshold, :volume_24h,
-                    :yes_price, :model_prob, :ensemble_pct, :ensemble_n, :logged_at)
+                    :yes_price, :model_prob, :ensemble_pct, :ensemble_n, :logged_at,
+                    :condition_id)
             ON CONFLICT(logged_date, city, threshold) DO UPDATE SET
                 volume_24h   = excluded.volume_24h,
                 yes_price    = excluded.yes_price,
                 model_prob   = excluded.model_prob,
                 ensemble_pct = excluded.ensemble_pct,
                 ensemble_n   = excluded.ensemble_n,
-                logged_at    = excluded.logged_at
+                logged_at    = excluded.logged_at,
+                condition_id = COALESCE(excluded.condition_id, weather_city_log.condition_id)
         """, entry)
 
 
