@@ -36,6 +36,12 @@ def run_resolve_pass(executor) -> int:
     Uses the CLOB midpoint API (via stored YES token_id) instead of the
     Gamma API, which returns 422 for closed/resolved markets.
 
+    Also processes ``exit_pending`` rows past their end_date — defence in
+    depth so a trade stuck in pending-exit (e.g. dump order never matched
+    before the orderbook was torn down) can still be settled by the
+    resolution path. ``exit_pending`` rows are cleared of their stale
+    exit_order_* fields immediately before ``settle_resolved`` is invoked.
+
     Args:
         executor: PaperExecutor instance (provides settle_resolved)
 
@@ -43,13 +49,15 @@ def run_resolve_pass(executor) -> int:
         Number of trades settled this pass.
     """
     open_trades = db.get_open_trades()
-    if not open_trades:
+    pending_exits = db.get_exit_pending_trades()
+    resolvable = open_trades + pending_exits
+    if not resolvable:
         return 0
 
     now     = datetime.now(timezone.utc)
     settled = 0
 
-    for trade in open_trades:
+    for trade in resolvable:
         end_date_str = trade.get("end_date", "")
         if not end_date_str:
             continue
@@ -130,6 +138,20 @@ def run_resolve_pass(executor) -> int:
             if hours_to_end <= 0:
                 print(f"  [resolve] Waiting on settlement: {trade['market_name'][:50]} YES={yes_price:.2f}")
             continue
+
+        # If we're settling a stuck exit_pending row, clear the stale
+        # exit_order_* fields first so the trade is clean before
+        # settle_resolved writes the terminal status.
+        if trade.get("status") == "exit_pending":
+            print(f"  [resolve] Rescuing stuck exit_pending trade #{trade['id']} "
+                  f"({trade['market_name'][:50]})")
+            db.update_trade(trade["id"], {
+                "status":                 "open",
+                "exit_order_id":          None,
+                "exit_order_price":       None,
+                "exit_order_placed_at":   None,
+            })
+            trade["status"] = "open"
 
         executor.settle_resolved(trade, resolved_yes)
         settled += 1

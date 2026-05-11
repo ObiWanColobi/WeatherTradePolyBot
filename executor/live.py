@@ -1528,6 +1528,36 @@ class LiveExecutor(BaseExecutor):
                         "Reason": reason},
                color=COLOR_GREEN)
 
+    def _recover_dead_exit_order(self, trade: dict, legs: list,
+                                  token_id: str, order_id: str,
+                                  reason: str = "not_found"):
+        """
+        Reconcile a GTC exit order the CLOB no longer reports as live.
+
+        Covers two cases:
+          - reason='cancelled': CLOB returned status in {cancelled, expired, ...}
+          - reason='not_found': CLOB returned None for the order
+
+        First checks whether the position was actually sold (the order may have
+        filled before being evicted from the order endpoint). If sell fills are
+        found, settles the exit normally. Otherwise reverts every leg to
+        'open' and clears the exit_order_* fields so the resolver / normal
+        exit logic can pick the position up on the next cycle.
+        """
+        result = self._lookup_sell_fills(token_id, trade)
+        if result and result[0] is not None and result[1] is not None and result[1] > 0:
+            self._settle_exit(trade, legs, result[0], result[1], result[2])
+            return
+
+        print(f"[live] Exit order {order_id[:12]} {reason} — reverting to open")
+        for leg in legs:
+            db.update_trade(leg["id"], {"status": "open"})
+        db.update_trade(trade["id"], {
+            "exit_order_id":        None,
+            "exit_order_price":     None,
+            "exit_order_placed_at": None,
+        })
+
     def manage_pending_exit(self, trade: dict):
         """Check fill status of a pending GTC exit, reprice if needed, settle if filled."""
         order_id = trade.get("exit_order_id")
@@ -1550,7 +1580,13 @@ class LiveExecutor(BaseExecutor):
             return
 
         if order is None:
-            print(f"[live] Exit order {order_id[:12]} not found — will retry next cycle")
+            # CLOB no longer recognises the order. Most commonly this happens
+            # when the market resolved while a GTC dump sat unfilled, and the
+            # orderbook was torn down. Treat the same as a cancelled order:
+            # check for any external sell fills, otherwise revert to 'open'
+            # so the resolver can settle the position on its next pass.
+            print(f"[live] Exit order {order_id[:12]} not found — recovering")
+            self._recover_dead_exit_order(trade, legs, token_id, order_id)
             return
 
         status = (order.get("status") or "").lower()
@@ -1582,18 +1618,8 @@ class LiveExecutor(BaseExecutor):
 
         # ── Cancelled/expired ─────────────────────────────────────────────────
         if status in ("cancelled", "expired", "dead", "canceled"):
-            result = self._lookup_sell_fills(token_id, trade)
-            if result and result[0] is not None and result[1] is not None and result[1] > 0:
-                self._settle_exit(trade, legs, result[0], result[1], result[2])
-                return
-            print(f"[live] Exit order {order_id[:12]} was cancelled — reverting to open")
-            for leg in legs:
-                db.update_trade(leg["id"], {"status": "open"})
-            db.update_trade(trade["id"], {
-                "exit_order_id": None,
-                "exit_order_price": None,
-                "exit_order_placed_at": None,
-            })
+            self._recover_dead_exit_order(trade, legs, token_id, order_id,
+                                          reason="cancelled")
             return
 
         # ── Partial fill ──────────────────────────────────────────────────────

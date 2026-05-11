@@ -404,3 +404,101 @@ def test_import_orphaned_imports_when_market_info_missing(
 
     mock_db.insert_trade.assert_called_once()
     mock_notify.assert_not_called()
+
+
+# ── manage_pending_exit: CLOB returns None (order evicted) ──────────────────
+#
+# Regression: a GTC exit order placed before market resolution is sometimes
+# evicted from the CLOB order endpoint once the orderbook is torn down. The
+# previous code path only logged "not found — will retry next cycle" and
+# never recovered, stranding the trade in status='exit_pending' forever.
+
+def _exit_pending_trade():
+    return {
+        "id": 51, "market_id": "cond-tokyo", "market_name": "Tokyo NO 25C May 10",
+        "token_id": "tok-no-tokyo", "direction": "NO",
+        "shares": 85.2, "size_usdc": 75.83,
+        "fill_price": 0.89, "end_date": "2026-05-10T23:59:59Z",
+        "exit_order_id": "0xc0b83e26091bb03a",
+        "exit_order_price": 0.01,
+        "exit_order_placed_at": "2026-05-10T05:20:43+00:00",
+        "status": "exit_pending",
+        "opened_at": "2026-05-09T03:01:04+00:00",
+        "fee_usdc": 0.0,
+    }
+
+
+@patch("executor.live.db")
+def test_manage_pending_exit_none_with_no_fills_reverts_to_open(mock_db):
+    """CLOB returns None and no external sells found → revert to status='open'."""
+    from executor.live import LiveExecutor
+
+    trade = _exit_pending_trade()
+    mock_db.get_position_legs.return_value = [trade]
+
+    ex = LiveExecutor.__new__(LiveExecutor)
+    ex._client = MagicMock()
+    ex._client.get_order.return_value = None
+    ex._throttle_clob = MagicMock()
+    ex._lookup_sell_fills = MagicMock(return_value=(None, None, 0.0))
+
+    ex.manage_pending_exit(trade)
+
+    ex._lookup_sell_fills.assert_called_once()
+    update_calls = mock_db.update_trade.call_args_list
+    assert any(
+        c[0][0] == 51 and c[0][1].get("status") == "open" for c in update_calls
+    ), "leg should be reverted to status='open'"
+    assert any(
+        c[0][0] == 51 and c[0][1].get("exit_order_id") is None for c in update_calls
+    ), "exit_order_id should be cleared"
+
+
+@patch("executor.live.db")
+def test_manage_pending_exit_none_with_sell_fills_settles_exit(mock_db):
+    """CLOB returns None but sell fills exist → settle exit normally."""
+    from executor.live import LiveExecutor
+
+    trade = _exit_pending_trade()
+    mock_db.get_position_legs.return_value = [trade]
+
+    ex = LiveExecutor.__new__(LiveExecutor)
+    ex._client = MagicMock()
+    ex._client.get_order.return_value = None
+    ex._throttle_clob = MagicMock()
+    ex._lookup_sell_fills = MagicMock(return_value=(0.45, 85.2 * 0.45, 0.10))
+    ex._settle_exit = MagicMock()
+
+    ex.manage_pending_exit(trade)
+
+    ex._settle_exit.assert_called_once()
+    settle_args = ex._settle_exit.call_args[0]
+    assert settle_args[2] == 0.45                  # fill_price
+    assert settle_args[3] == 85.2 * 0.45           # total_shares
+    revert_calls = [
+        c for c in mock_db.update_trade.call_args_list
+        if c[0][1].get("status") == "open"
+    ]
+    assert revert_calls == []
+
+
+@patch("executor.live.db")
+def test_manage_pending_exit_cancelled_still_uses_helper(mock_db):
+    """The existing cancelled/expired path must continue to recover."""
+    from executor.live import LiveExecutor
+
+    trade = _exit_pending_trade()
+    mock_db.get_position_legs.return_value = [trade]
+
+    ex = LiveExecutor.__new__(LiveExecutor)
+    ex._client = MagicMock()
+    ex._client.get_order.return_value = {"status": "cancelled"}
+    ex._throttle_clob = MagicMock()
+    ex._lookup_sell_fills = MagicMock(return_value=(None, None, 0.0))
+
+    ex.manage_pending_exit(trade)
+
+    update_calls = mock_db.update_trade.call_args_list
+    assert any(
+        c[0][0] == 51 and c[0][1].get("status") == "open" for c in update_calls
+    )
