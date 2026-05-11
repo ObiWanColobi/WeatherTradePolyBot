@@ -48,6 +48,7 @@ _CITY_ADJUSTMENT_ENABLED     = WEATHER.get("entry_city_adjustment_enabled",     
 _CITY_STRICT_CITIES          = {c.lower() for c in WEATHER.get("entry_city_strict_cities", [])}
 _CITY_STRICT_MIN_CONVICTION  = WEATHER.get("entry_city_strict_min_conviction",  0.95)
 _CITY_STRICT_MIN_MARGIN_C    = WEATHER.get("entry_city_strict_min_margin_c",    4.0)
+_BLOCKED_CITIES              = {c.lower() for c in WEATHER.get("entry_blocked_cities", [])}
 
 
 @dataclass
@@ -69,6 +70,22 @@ def check_entry(market: dict, scan_data: dict, direction: str | None = None) -> 
         EntryDecision with ok=True only if all checks pass.
     """
     checks = {}
+
+    # ── 0. Blocked city (tampering-defense shim) ─────────────────────────────
+    # Cities removed from the tradeable universe pending tier-system rollout.
+    # METAR shadow capture continues independently.
+    city_lower = (scan_data.get("city", "") or "").lower()
+    if city_lower in _BLOCKED_CITIES:
+        checks["blocked_city"] = {
+            "ok":    False,
+            "value": city_lower,
+            "need":  "city not in entry_blocked_cities",
+        }
+        return EntryDecision(
+            ok=False,
+            reason=f"city '{city_lower}' is in entry_blocked_cities (tampering defense)",
+            checks=checks,
+        )
 
     # ── 1. Ensemble conviction ────────────────────────────────────────────────
     ens_n   = scan_data.get("ensemble_n", 0)

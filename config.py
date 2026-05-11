@@ -111,6 +111,16 @@ WEATHER = {
     "entry_city_strict_min_conviction": 0.90,  # require near-unanimous for these cities (vs 0.85 default)
     "entry_city_strict_min_margin_c":   4.0,   # require wider margin for these cities (vs 3.0 default)
 
+    # ── Tampering-defense blocklist (2026-05-11) ─────────────────────────────
+    # Cities removed from the tradeable universe due to confirmed/suspected
+    # resolution-source tampering. METAR shadow capture continues unchanged
+    # (CITY_RESOLVERS in markets/metar_observer.py is untouched).
+    # See tasks/plans/2026-05-11_tampering_defense_tier_system.md for the
+    # generalized tier system that will eventually replace this shim.
+    "entry_blocked_cities": [
+        "tokyo",   # 2026-05-10 RJTT 25.0°C single-spike + dewpoint-unchanged signature; lost NO #51 -$75.83
+    ],
+
     # ╔═══════════════════════════════════════════════════════════════════════════╗
     # ║  EXIT CONDITIONS                                                        ║
     # ║  When to close an open position before market resolution                ║
