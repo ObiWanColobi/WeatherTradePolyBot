@@ -148,7 +148,7 @@ WEATHER = {
     # ╚═══════════════════════════════════════════════════════════════════════════╝
     "kelly_fraction":                0.50,    # fractional Kelly multiplier (0.5 = half-Kelly)
     "kelly_max_bet_usdc":           15.00,   # PAPER: hard cap per trade in USDC
-    "kelly_min_bet_usdc":             5.00,   # minimum bet size (below this = skip)
+    "kelly_min_bet_usdc":             1.00,   # minimum bet size (below this = skip) — 2026-05-12 dropped 5→1 for near-dry-run shadow window
     "kelly_max_balance_pct":          0.02,   # never risk more than 10% of balance per trade
     "kelly_max_bet_usdc_unanimous":  50.00,   # PAPER: separate hard cap for unanimous-weak trades
 
@@ -183,8 +183,8 @@ WEATHER = {
     # ║  These REPLACE the paper defaults above when running with real money.   ║
     # ║  More conservative caps to limit downside while validating the system.  ║
     # ╚═══════════════════════════════════════════════════════════════════════════╝
-    "live_kelly_max_bet_usdc":           50.00,   # overrides kelly_max_bet_usdc (paper $15 → live $50)
-    "live_kelly_max_bet_usdc_unanimous": 75.00,   # overrides kelly_max_bet_usdc_unanimous (paper $50 → live $75)
+    "live_kelly_max_bet_usdc":            2.00,   # 2026-05-12: dropped 50→2 — near-dry-run shadow window while Phase 2 data accumulates (gate 2026-06-07)
+    "live_kelly_max_bet_usdc_unanimous":  2.00,   # 2026-05-12: dropped 75→2 — same reason
     "live_risk_daily_loss_limit_pct":     0.10,   # overrides risk_daily_loss_limit_pct (same for now, tighten as needed)
     "live_risk_auto_reset":              True,   # overrides risk_auto_reset — (False = manual override only, no midnight reset)
 
