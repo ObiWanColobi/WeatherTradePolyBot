@@ -391,9 +391,10 @@ def test_import_orphaned_imports_active_market(
 def test_import_orphaned_imports_when_market_info_missing(
     mock_db, mock_pm, mock_notify, mock_parse, mock_layer
 ):
-    """Gamma outage: preserve existing import behavior, don't skip."""
+    """Gamma outage with no prior DB record: preserve import behavior."""
     from executor.live import LiveExecutor
 
+    mock_db.get_trades_by_token_id.return_value = []
     mock_pm.get_market_by_id.return_value = None
     mock_parse.return_value = None
     mock_layer.return_value.scan.return_value = None
@@ -404,6 +405,37 @@ def test_import_orphaned_imports_when_market_info_missing(
 
     mock_db.insert_trade.assert_called_once()
     mock_notify.assert_not_called()
+
+
+@patch("executor.live.polymarket")
+@patch("executor.live.db")
+def test_import_orphaned_skips_when_already_resolved_in_db(mock_db, mock_pm):
+    """Wallet residue from a resolved-and-closed trade must not re-import.
+
+    Regression for 2026-05-12: HK >=31C double-counted -$12.49 loss after
+    restart. Market was mid-resolution → Gamma returned None (422) →
+    API-based guard fell through → bot imported the same on-chain shares
+    as a new trade → Poll #1 immediately resolved it for a second
+    identical loss. The DB-first guard short-circuits regardless of API
+    state when a prior closed trade with a recorded resolution exists.
+    """
+    from executor.live import LiveExecutor
+
+    mock_db.get_trades_by_token_id.return_value = [{
+        "id": 54,
+        "status": "closed",
+        "actual_resolution": "YES",
+    }]
+    # Even with Gamma returning None (the original failure mode), the DB
+    # check fires first — no API call needed.
+    mock_pm.get_market_by_id.return_value = None
+
+    ex = LiveExecutor.__new__(LiveExecutor)
+    ex._client = MagicMock()
+    ex._import_orphaned_position(_orphan_pos())
+
+    mock_db.insert_trade.assert_not_called()
+    mock_pm.get_market_by_id.assert_not_called()
 
 
 # ── manage_pending_exit: CLOB returns None (order evicted) ──────────────────

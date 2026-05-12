@@ -676,6 +676,27 @@ class LiveExecutor(BaseExecutor):
         avg_price = pos.get("avg_price", 0)
         current_price = pos.get("current_price", 0)
 
+        # ── Guard: residue of already-resolved trade in our DB ──────────────
+        # If a closed trade row with a recorded resolution already exists for
+        # this token, the on-chain shares are residue (winning shares awaiting
+        # redeem, or worthless losing shares). Re-importing would double-count
+        # the P&L — exactly what happened to HK >=31C on 2026-05-12 when the
+        # market was mid-resolution (Gamma returned 422 → market_info=None,
+        # so the API-based guard below fell through). DB lookup is
+        # deterministic regardless of API state.
+        prior = db.get_trades_by_token_id(token_id) if token_id else []
+        resolved_prior = [
+            t for t in prior
+            if t.get("status") == "closed"
+            and t.get("actual_resolution") in ("YES", "NO")
+        ]
+        if resolved_prior:
+            prev_id = resolved_prior[0]["id"]
+            label = (pos.get("question") or market_id or token_id or "?")[:50]
+            print(f"       SKIPPED: residue of resolved trade #{prev_id}  "
+                  f"{label}  shares={shares:.2f}  avg=${avg_price:.4f}")
+            return
+
         # Fetch market details from Gamma API
         market_info = polymarket.get_market_by_id(market_id) if market_id else None
         question   = ""

@@ -543,6 +543,22 @@ def get_open_trades() -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def get_trades_by_token_id(token_id: str) -> list[dict]:
+    """Return all trade rows (any status) that share a token_id.
+
+    Used by the startup orphan-import guard to detect wallet residue
+    from already-resolved trades and prevent double-counting P&L.
+    """
+    if not token_id:
+        return []
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM trades WHERE token_id = ? ORDER BY opened_at ASC",
+            (token_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def get_exit_pending_trades() -> list[dict]:
     """Return parent trades that have a pending GTC exit order on the CLOB."""
     with get_conn() as conn:
