@@ -57,3 +57,4 @@ claude-swap/
 # ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+scripts/_inspect_db.py
