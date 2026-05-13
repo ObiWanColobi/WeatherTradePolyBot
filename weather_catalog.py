@@ -109,19 +109,34 @@ def run_snapshot() -> int:
     """
     Fetch all active weather markets, compute model probability for each,
     and upsert into weather_city_log. Returns number of rows written.
+
+    logged_date is the market's resolution day (parsed from end_date), not
+    the snapshot date. This keeps the (logged_date, city, threshold) key
+    pointing at the *same* underlying market across snapshots — so the
+    backfill writes the resolution to the right row, and downstream readers
+    like get_prev_day_resolution see the city's outcome on its named day.
+    Markets without a parseable resolution date are skipped.
     """
     db.init_db()
-    today    = datetime.now(timezone.utc).date().isoformat()
     logged_at = datetime.now(timezone.utc).isoformat()
+    today     = datetime.now(timezone.utc).date().isoformat()
 
-    print(f"[catalog] Fetching markets for {today}...")
+    print(f"[catalog] Fetching markets at {logged_at}...")
     markets = fetch_all_weather_markets()
     print(f"[catalog] Found {len(markets)} weather markets. Computing model probs...")
 
     written = 0
     skipped = 0
+    no_date = 0
 
     for market in markets:
+        # Resolution date = first 10 chars of end_date_iso ('YYYY-MM-DD').
+        # Without it we can't anchor the row to a settlement, so skip.
+        market_resolution_date = (market.get("end_date") or "")[:10]
+        if not market_resolution_date or len(market_resolution_date) != 10:
+            no_date += 1
+            continue
+
         scan_data = _layer.scan(market)
         if scan_data is None:
             skipped += 1
@@ -136,7 +151,7 @@ def run_snapshot() -> int:
         ens_pct = (ens_yes / ens_n) if ens_n and ens_yes is not None else None
 
         entry = {
-            "logged_date":  today,
+            "logged_date":  market_resolution_date,
             "city":         scan_data["city"],
             "market_type":  scan_data["market_type"],
             "threshold":    scan_data["target_str"],
@@ -152,7 +167,7 @@ def run_snapshot() -> int:
         db.upsert_city_log(entry)
         written += 1
 
-    print(f"[catalog] Done — {written} rows written, {skipped} skipped.")
+    print(f"[catalog] Done — {written} rows written, {skipped} skipped, {no_date} no end_date.")
     return written
 
 

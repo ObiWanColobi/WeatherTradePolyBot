@@ -398,18 +398,26 @@ _DET_BEST_MODEL: dict[str, str] = {
 
 
 def _traj_regime_flag(traj: dict) -> int | None:
-    """E15.3-01 — fire when D-5..D-1 drift is consistent and within bounds.
-    Spec: |drift| >= 1.0°C, monotone direction across all 4 deltas, and
-    max single-step change < 2.0°C. Returns None if any of D-5..D-1 is
-    missing (cannot evaluate).
+    """E15.3-01 — fire when the multi-init drift toward res_date is consistent.
+
+    Evaluates D-4..D-1 (4 inits, 3 deltas). The original E15.3 spec described
+    D-5..D-1 / 4 deltas, but Open-Meteo's ensemble fetch saves only 5 days per
+    init (target+0 to target+4) — so D-5 (= init = target-5) never includes
+    target itself and was always None in production. Trimming to D-4..D-1
+    keeps the same direction-consistency / max-step gate using the data we
+    actually have. Returns None if any of D-4..D-1 is missing.
+
+    Rule (unchanged from spec, applied to the 4-init window):
+      |D-1 - D-4| >= 1.0°C, monotone direction across the 3 deltas, and
+      max single-step change < 2.0°C.
     """
-    inits = [traj.get(f"traj_init_d{n}") for n in (5, 4, 3, 2, 1)]
+    inits = [traj.get(f"traj_init_d{n}") for n in (4, 3, 2, 1)]
     if any(v is None for v in inits):
         return None
     drift = inits[-1] - inits[0]
     if abs(drift) < 1.0:
         return 0
-    deltas = [inits[i + 1] - inits[i] for i in range(4)]
+    deltas = [inits[i + 1] - inits[i] for i in range(len(inits) - 1)]
     # "direction-consistent" admits flat steps; only sign reversals violate.
     if not all(d >= 0 for d in deltas) and not all(d <= 0 for d in deltas):
         return 0
