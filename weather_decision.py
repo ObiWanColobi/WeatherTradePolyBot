@@ -539,9 +539,14 @@ def _write_phase2_snapshot(
         # Day count: open-meteo forecast_days param accepts 1..16. We need
         # whatever day the market resolves on, capped at 7 for the Phase2-01
         # snapshot scope. Days >7 are rare for Polymarket weather markets.
+        # +2 buffer (not +1) because the API uses `timezone=auto` and
+        # returns city-local daily rows: when "now" is early UTC the city's
+        # local date is still yesterday, so a strict UTC-diff under-counts
+        # by one. Seattle decision #34 (2026-05-13 00:03 UTC, target May 14)
+        # hit this — days_out=2 returned only May 12+13 PT, missing target.
         target_dt = datetime.fromisoformat(res_date).date()
         today_dt  = datetime.now(timezone.utc).date()
-        days_out  = max(1, min(7, (target_dt - today_dt).days + 1))
+        days_out  = max(2, min(7, (target_dt - today_dt).days + 2))
 
         try:
             icon_fc = get_deterministic_per_model(
@@ -561,7 +566,16 @@ def _write_phase2_snapshot(
         except Exception as e:
             print(f"[decision] phase2 gfs fetch failed city={city}: {e}")
 
-        src_tag = "live-forecast/icon_seamless+gfs_seamless"
+        # Tag reflects actual outcome, not just intent — a row with src_tag
+        # "live-forecast/..." but both temps NULL was masking missing-data
+        # cases (see Seattle #34: API succeeded but target day not in window).
+        got = []
+        if icon_temp is not None: got.append("icon_seamless")
+        if gfs_temp  is not None: got.append("gfs_seamless")
+        src_tag = (
+            "live-forecast/" + "+".join(got) if got
+            else "live-forecast/none"
+        )
 
     # Phase2-02: ensemble spread. Try the layer3 cache first (free); fall
     # back to a fresh ensemble fetch if the cache is cold for this city/date

@@ -150,10 +150,17 @@ def get_deterministic_per_model(
 _ENSEMBLE_MODELS = ["icon_seamless", "gfs025"]   # 40 + 31 = up to 71 members
 
 
-def get_ensemble_forecasts(lat: float, lon: float, tz: str = "auto", days: int = 4) -> list[dict]:
+def get_ensemble_forecasts(lat: float, lon: float, tz: str = "auto", days: int = 5) -> list[dict]:
     """
     Returns a multi-model ensemble combining ICON (40 members) and GFS (31 members)
     for up to 71 total daily max temps per day.
+
+    Default depth raised 2026-05-13 from 4 to 5 days so the sidecar saves
+    enough forward forecast for the trajectory feature: target=N requires
+    init=N-4 to contain N (5 days = init+0..init+4). At days=4 the API
+    inconsistently returned 4 or 5 day rows depending on UTC hour, so
+    older inits in weather_ensemble_history sometimes stop at init+3 and
+    couldn't service D-4. Bumping the default closes that gap going forward.
 
     Using two independent models captures both initial-condition uncertainty (within
     each model's ensemble) and model-structural uncertainty (between models), which
