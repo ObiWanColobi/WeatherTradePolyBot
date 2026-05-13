@@ -11,7 +11,7 @@ Feature activation: set METAR_ENABLED=true in the environment.
 """
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Iterable
 
 import requests
@@ -82,6 +82,10 @@ class MetarState:
     last_fetched_at_utc: datetime | None
     is_stale:         bool                  # True when last fetch > _STALE_TTL_SEC ago
     pending_suspect:  MetarReading | None = field(default=None, repr=False)
+    # City-local calendar date that max_today_c belongs to. None when max_today_c is None.
+    # Consumers (weather_exit) compare against the market's resolution date so a lock
+    # only fires when the running max is from the same day the market resolves on.
+    max_today_local_date: date | None = None
 
     def delta_to_threshold(self, threshold_c: float) -> float | None:
         if self.max_today_c is None:
@@ -286,6 +290,21 @@ def _update_city_state(
     prev_reading = prev_state.last_reading if prev_state else None
     pending      = prev_state.pending_suspect if prev_state else None
     max_today    = prev_state.max_today_c    if prev_state else None
+    prev_max_date = prev_state.max_today_local_date if prev_state else None
+
+    # Today's city-local calendar date. Used to (a) reset the running max when
+    # the local day rolls over and (b) tag any new max with the day it belongs to.
+    try:
+        from zoneinfo import ZoneInfo
+        today_local_date = now_utc.astimezone(ZoneInfo(tz)).date()
+    except Exception:
+        today_local_date = now_utc.date()
+
+    # Reset accumulator on local-day rollover. Without this, yesterday's high
+    # carries forward into "today" because new readings only update max when
+    # they exceed it — they never replace a stale value with a lower one.
+    if prev_max_date is not None and prev_max_date != today_local_date:
+        max_today = None
 
     fetch_succeeded = bool(new_readings)
 
@@ -366,6 +385,7 @@ def _update_city_state(
         last_fetched_at_utc=last_fetched,
         is_stale=is_stale,
         pending_suspect=pending,
+        max_today_local_date=today_local_date if max_today is not None else None,
     )
 
     with _LOCK:

@@ -1,7 +1,10 @@
 """Tests for executor.weather_exit.check_weather_exit."""
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+
+import pytest
 
 from executor.weather_exit import check_weather_exit
+from markets.metar_observer import MetarReading, MetarState
 
 
 def _iso(hours_from_now: float) -> str:
@@ -141,3 +144,119 @@ def test_no_late_game_divergence_when_current_ensemble_is_none():
     sig = check_weather_exit(trade, {}, current_ensemble_pct=None)
 
     assert "late-game market divergence" not in sig.reason
+
+
+# ── Observed-lock date matching ──────────────────────────────────────────────
+#
+# Regression for the 2026-05-12/13 "weird exit reason" incident: the METAR lock
+# was firing using yesterday's max for today's market. Two bugs combined:
+#
+#   A. metar_observer carried max_today_c forward across local-day rollover
+#      → Tel Aviv #61 exited at 00:09 TLV May 13 with May 12's 34°C still cached.
+#   B. weather_exit didn't verify the running max belonged to the market's day
+#      → Hong Kong #56 exited at 16:05 HKT May 12 using May 12's 31°C peak
+#        against the May 13 market (lost $28.99).
+#
+# Fix: MetarState now tracks max_today_local_date; weather_exit only fires the
+# lock when that date equals the market's city-local resolution date.
+
+def _metar_state(*, max_c: float, max_date: date | None, icao: str = "LLBG"):
+    """Build a MetarState whose max_today_c is dated to `max_date`."""
+    return MetarState(
+        city="tel aviv",
+        icao=icao,
+        max_today_c=max_c,
+        last_reading=MetarReading(
+            icao=icao,
+            observed_at_utc=datetime.now(timezone.utc) - timedelta(minutes=5),
+            temp_c=max_c,
+            dewpoint_c=None,
+            raw_report="",
+            source="avwx",
+        ),
+        last_fetched_at_utc=datetime.now(timezone.utc),
+        is_stale=False,
+        max_today_local_date=max_date,
+    )
+
+
+@pytest.fixture
+def enable_lock(monkeypatch):
+    """Flip metar_exit_on_lock on for the duration of the test."""
+    from executor import weather_exit
+    monkeypatch.setitem(weather_exit.WEATHER, "metar_exit_on_lock", True)
+
+
+def test_observed_lock_fires_when_max_date_matches_market_date(enable_lock):
+    """Positive: NO position, observed max breaches threshold, dates match → exit."""
+    trade = _trade(
+        end_date="2026-05-13",
+        threshold=">=30C",
+        direction="NO",
+        fill_price=0.93,
+        current_price=0.91,
+    )
+    state = _metar_state(max_c=34.0, max_date=date(2026, 5, 13))
+    sig = check_weather_exit(trade, {}, current_ensemble_pct=0.0, metar_state=state)
+
+    assert sig.should_exit is True
+    assert "observed lock YES" in sig.reason
+    assert sig.urgent is True
+
+
+def test_observed_lock_blocked_when_max_is_from_yesterday(enable_lock):
+    """Bug A regression — Tel Aviv #61.
+
+    Market resolves May 13 TLV. max_today_c=34°C but it was set on May 12 (the
+    accumulator before the fix carried the prior day forward at local midnight).
+    With max_today_local_date=May 12 the lock must NOT fire on the May 13 market.
+    """
+    trade = _trade(
+        end_date="2026-05-13",
+        threshold=">=30C",
+        direction="NO",
+        fill_price=0.93,
+        current_price=0.91,
+    )
+    state = _metar_state(max_c=34.0, max_date=date(2026, 5, 12))
+    sig = check_weather_exit(trade, {}, current_ensemble_pct=0.0, metar_state=state)
+
+    assert sig.should_exit is False
+    assert "observed lock" not in sig.reason
+
+
+def test_observed_lock_blocked_for_next_day_market(enable_lock):
+    """Bug B regression — Hong Kong #56 / Toronto #63 / Munich #60 / Taipei #64.
+
+    Bot evaluates a day-ahead market while still in the prior local day. Without
+    the date guard, today's max (which is for a different day than the market)
+    blindly locks the position. The lock must defer until the market's day starts.
+    """
+    trade = _trade(
+        end_date="2026-05-14",    # day-ahead market
+        threshold=">=14C",
+        direction="NO",
+        fill_price=0.81,
+        current_price=0.85,
+    )
+    state = _metar_state(max_c=15.0, max_date=date(2026, 5, 13))  # today's max
+    sig = check_weather_exit(trade, {}, current_ensemble_pct=0.0, metar_state=state)
+
+    assert sig.should_exit is False
+    assert "observed lock" not in sig.reason
+
+
+def test_observed_lock_blocked_when_max_date_is_none(enable_lock):
+    """Fail-closed: a state with no dated max (e.g. fresh boot) cannot lock."""
+    trade = _trade(
+        end_date="2026-05-13",
+        threshold=">=30C",
+        direction="NO",
+        fill_price=0.93,
+        current_price=0.91,         # avoid spurious adverse/late-game fire
+    )
+    state = _metar_state(max_c=34.0, max_date=None)
+    sig = check_weather_exit(trade, {}, current_ensemble_pct=0.0, metar_state=state)
+
+    assert sig.should_exit is False
+    assert "observed lock" not in sig.reason

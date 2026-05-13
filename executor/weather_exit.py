@@ -16,7 +16,7 @@ What we deliberately do NOT do:
   - Blanket final-hour lock (removed 2026-04-15 — the late-game divergence check now covers this window)
 """
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING
 
 from config import WEATHER
@@ -100,7 +100,19 @@ def check_weather_exit(
         parsed_thresh = parse_threshold_c(trade.get("threshold") or "")
         trade_dir     = (trade.get("direction") or "").lower()
 
-        if parsed_thresh is not None and metar_state.max_today_c is not None:
+        # max_today_c must belong to the same city-local day the market resolves on.
+        # Without this guard, a NO position on a future-day market locks YES off
+        # yesterday's high (Bug A), or a same-day position locks off the prior
+        # local day still carried in the accumulator (Bug B).
+        market_resolution_date = _parse_market_resolution_date(trade.get("end_date") or "")
+
+        if (
+            parsed_thresh is not None
+            and metar_state.max_today_c is not None
+            and metar_state.max_today_local_date is not None
+            and market_resolution_date is not None
+            and metar_state.max_today_local_date == market_resolution_date
+        ):
             op, threshold_c = parsed_thresh
 
             # Lock-YES: observed max has already reached the "above" threshold.
@@ -268,6 +280,20 @@ def check_weather_exit(
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _parse_market_resolution_date(end_date_str: str) -> date | None:
+    """
+    Weather markets store end_date as 'YYYY-MM-DD' (or an ISO datetime) and the
+    date portion matches the resolution day named in the market title in the
+    city's local calendar. Return that date for matching against MetarState.
+    """
+    if not end_date_str:
+        return None
+    try:
+        return date.fromisoformat(end_date_str[:10])
+    except Exception:
+        return None
+
 
 def _hours_to_close(end_date_str: str) -> float | None:
     try:
