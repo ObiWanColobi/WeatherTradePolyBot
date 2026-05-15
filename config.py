@@ -129,7 +129,8 @@ WEATHER = {
     "exit_adverse_price_move_pct":      0.30,  # exit if price moves >30% of fill against position
     "exit_adverse_min_move_cents":      0.10,  # floor: never exit on moves smaller than 10 cents (prevents noise exits on cheap tokens)
     "exit_adverse_min_hold_minutes":    60,    # no adverse exit within first 60 min (post-entry price settling)
-    "exit_adverse_skip_unanimous_pct":  .9,    # skip adverse exit when ensemble conviction >= 90% (trust the model)
+    # NOTE: prior "exit_adverse_skip_unanimous_pct" bypass removed 2026-05-15 after backfill showed
+    # it doubled loss magnitude on unanimous-but-wrong trades; see tasks/plans/2026-05-15_remove_unanimous_bypass.md
 
     # ── Late-game market divergence exit (2026-04-15) ─────────────────────────
     # In the final hours before close, if our token price has collapsed but the

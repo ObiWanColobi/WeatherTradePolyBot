@@ -105,6 +105,49 @@ def test_active_market_late_game_divergence_still_fires():
     assert sig.urgent is True
 
 
+# ── Adverse exit on unanimous-entry trade (2026-05-15) ──────────────────────
+#
+# Regression: prior code skipped adverse-price exit entirely when entry
+# ensemble was near-unanimous (>=90% conviction). Backfill on 52 closed trades
+# showed this doubled loss magnitude on unanimous-but-wrong trades. The bypass
+# was removed; adverse must now fire on a unanimous-entry trade once the
+# 60-min cooldown has passed and the price has moved >=30% adverse.
+
+def test_adverse_fires_on_unanimous_entry_past_cooldown():
+    """Chicago #68 scenario: unanimous-NO entry, price collapsed, must exit."""
+    trade = _trade(
+        end_date=_iso(12),          # well outside late-game window
+        direction="NO",
+        fill_price=0.56,
+        current_price=0.17,         # 70% adverse — way past 30% threshold
+        entry_ensemble_yes=4,       # 4/69 = 5.8% YES — in old bypass zone
+        entry_ensemble_n=69,
+        opened_at=(datetime.now(timezone.utc) - timedelta(hours=38)).isoformat(),
+    )
+    sig = check_weather_exit(trade, {}, current_ensemble_pct=0.087)
+
+    assert sig.should_exit is True
+    assert "adverse price move" in sig.reason
+    assert sig.urgent is True
+
+
+def test_adverse_respects_cooldown_on_unanimous_entry():
+    """Cooldown still applies — unanimous-entry trade must not exit in first 60 min."""
+    trade = _trade(
+        end_date=_iso(12),
+        direction="NO",
+        fill_price=0.56,
+        current_price=0.17,
+        entry_ensemble_yes=4,
+        entry_ensemble_n=69,
+        opened_at=(datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(),
+    )
+    sig = check_weather_exit(trade, {}, current_ensemble_pct=0.087)
+
+    assert sig.should_exit is False
+    assert "adverse" not in sig.reason
+
+
 # ── Unavailable ensemble ─────────────────────────────────────────────────────
 #
 # Regression: when the target date has rolled out of the Open-Meteo forecast

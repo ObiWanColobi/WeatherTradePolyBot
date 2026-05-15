@@ -31,7 +31,6 @@ _ENSEMBLE_FLIP_THRESHOLD  = WEATHER.get("exit_ensemble_flip_threshold",   0.25)
 _ADVERSE_PRICE_MOVE_PCT   = WEATHER.get("exit_adverse_price_move_pct",    0.30)
 _ADVERSE_MIN_MOVE         = WEATHER.get("exit_adverse_min_move_cents",    0.10)
 _ADVERSE_MIN_HOLD_MINUTES = WEATHER.get("exit_adverse_min_hold_minutes",  60)
-_ADVERSE_SKIP_UNANIMOUS   = WEATHER.get("exit_adverse_skip_unanimous_pct", 0.90)
 # Late-game market divergence (2026-04-15) — replaces blanket 2h exit lock
 _LATE_GAME_HOURS          = WEATHER.get("exit_late_game_hours",              8.0)
 _LATE_GAME_MARKET_FLOOR   = WEATHER.get("exit_late_game_market_floor",       0.40)
@@ -234,47 +233,27 @@ def check_weather_exit(
     # This is now symmetric because current_price is always the price of the
     # token we actually hold (YES token for YES trades, NO token for NO trades).
     #
-    # Guards:
-    #   a) Cooldown — no adverse exit within first N minutes (post-entry settling)
-    #   b) Unanimous — skip adverse exit entirely when ensemble was near-unanimous
-    #      at entry (>=90% conviction). Trust the model; only ensemble flip can exit.
+    # Guard: cooldown — no adverse exit within first N minutes (post-entry settling).
+    # The prior "unanimous bypass" (skip when entry conviction >=90%) was removed
+    # 2026-05-15: backfill on 52 closed trades showed it doubled loss magnitude
+    # on losers (-90% vs -43% of stake avg) to protect a winner-dip scenario the
+    # data did not support occurring. See tasks/plans/2026-05-15_remove_unanimous_bypass.md.
     if current_price is not None and fill_price > 0 and current_price > 0.001:
-        # (a) Cooldown: skip adverse check if position is too new
         opened_at_str = trade.get("opened_at", "")
         minutes_held  = _minutes_since(opened_at_str)
-        if minutes_held is not None and minutes_held < _ADVERSE_MIN_HOLD_MINUTES:
-            pass  # skip adverse check — too soon after entry
-        else:
-            # (b) Unanimous bypass: skip if entry ensemble was near-unanimous
-            # Use raw counts for consistency (entry_ensemble_pct may be
-            # direction-adjusted in older trades).
-            _ey = trade.get("entry_ensemble_yes")
-            _en = trade.get("entry_ensemble_n")
-            if _ey is not None and _en and _en > 0:
-                _entry_pyes = _ey / _en
-            else:
-                _entry_pyes = None
-            is_unanimous  = (
-                _entry_pyes is not None
-                and (_entry_pyes >= _ADVERSE_SKIP_UNANIMOUS
-                     or _entry_pyes <= (1.0 - _ADVERSE_SKIP_UNANIMOUS))
-            )
-
-            if is_unanimous:
-                pass  # near-unanimous ensemble — trust the model, hold to resolution
-            else:
-                adverse_move      = fill_price - current_price
-                adverse_threshold = max(fill_price * _ADVERSE_PRICE_MOVE_PCT, _ADVERSE_MIN_MOVE)
-                if adverse_move >= adverse_threshold:
-                    return WeatherExitSignal(
-                        should_exit=True,
-                        reason=(
-                            f"adverse price move ${adverse_move:.3f} "
-                            f"(fill={fill_price:.3f}, now={current_price:.3f}, "
-                            f"threshold=${adverse_threshold:.3f})"
-                        ),
-                        urgent=True,
-                    )
+        if minutes_held is None or minutes_held >= _ADVERSE_MIN_HOLD_MINUTES:
+            adverse_move      = fill_price - current_price
+            adverse_threshold = max(fill_price * _ADVERSE_PRICE_MOVE_PCT, _ADVERSE_MIN_MOVE)
+            if adverse_move >= adverse_threshold:
+                return WeatherExitSignal(
+                    should_exit=True,
+                    reason=(
+                        f"adverse price move ${adverse_move:.3f} "
+                        f"(fill={fill_price:.3f}, now={current_price:.3f}, "
+                        f"threshold=${adverse_threshold:.3f})"
+                    ),
+                    urgent=True,
+                )
 
     return WeatherExitSignal(should_exit=False, reason="hold — no exit condition met")
 
