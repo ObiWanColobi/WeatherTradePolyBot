@@ -18,18 +18,12 @@ import argparse
 import json
 from datetime import datetime, timezone
 
-import requests
-
 import db
 from layers.layer3_weather import WeatherLayer
 from config import WEATHER
-from markets.polymarket import get_resolution_status
+from markets.polymarket import get_resolution_status, paginate_active_markets
 
-_session = requests.Session()
-_session.headers.update({"User-Agent": "weather-catalog/1.0"})
-
-GAMMA_API = "https://gamma-api.polymarket.com"
-_layer    = WeatherLayer()
+_layer = WeatherLayer()
 
 
 # ── Market fetching (same slug filter as scanner) ─────────────────────────────
@@ -45,32 +39,9 @@ def _parse_json_field(value) -> list:
 
 def fetch_all_weather_markets() -> list[dict]:
     """Fetch all active threshold weather markets regardless of volume."""
-    markets  = []
-    per_page = 200
+    markets = []
 
-    for page in range(40):
-        try:
-            resp = _session.get(
-                f"{GAMMA_API}/markets",
-                params={
-                    "active":    "true",
-                    "closed":    "false",
-                    "limit":     per_page,
-                    "offset":    page * per_page,
-                    "order":     "volume24hr",
-                    "ascending": "false",
-                },
-                timeout=10,
-            )
-            resp.raise_for_status()
-            batch = resp.json()
-        except Exception as e:
-            print(f"[catalog] fetch page {page} failed: {e}")
-            break
-
-        if not batch:
-            break
-
+    for batch in paginate_active_markets(max_pages=40, min_volume_24h=1):
         for m in batch:
             if "highest-temperature" not in (m.get("slug") or "").lower():
                 continue
@@ -94,11 +65,6 @@ def fetch_all_weather_markets() -> list[dict]:
                 "volume":   float(m.get("volume24hr") or 0),
                 "end_date": m.get("endDateIso") or m.get("endDate") or "",
             })
-
-        if batch and float(batch[-1].get("volume24hr") or 0) < 1:
-            break
-        if len(batch) < per_page:
-            break
 
     return markets
 

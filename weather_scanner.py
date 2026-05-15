@@ -26,22 +26,17 @@ import json
 import time
 from datetime import datetime, timezone, timedelta
 
-import requests
 from rich import box
 from rich.console import Console
 from rich.text import Text
 from rich.table import Table
 
 from layers.layer3_weather import WeatherLayer
+from markets.polymarket import paginate_active_markets
 from config import WEATHER
 
 console = Console(legacy_windows=False)
 _layer  = WeatherLayer()
-
-_session = requests.Session()
-_session.headers.update({"User-Agent": "weather-scanner/1.0"})
-
-GAMMA_API = "https://gamma-api.polymarket.com"
 
 # ── Scanner filter thresholds (from config, with safe defaults) ───────────────
 _MIN_YES        = WEATHER.get("scanner_min_yes",           0.05)
@@ -68,32 +63,9 @@ def fetch_weather_markets(pages: int = 25) -> list[dict]:
     Fetch active Polymarket markets with 'highest-temperature' in slug.
     Sorted by volume24hr descending so top markets surface early.
     """
-    markets  = []
-    per_page = 200
+    markets = []
 
-    for page in range(pages):
-        try:
-            resp = _session.get(
-                f"{GAMMA_API}/markets",
-                params={
-                    "active":    "true",
-                    "closed":    "false",
-                    "limit":     per_page,
-                    "offset":    page * per_page,
-                    "order":     "volume24hr",
-                    "ascending": "false",
-                },
-                timeout=10,
-            )
-            resp.raise_for_status()
-            batch = resp.json()
-        except Exception as e:
-            console.print(f"[red][scanner] page {page} fetch failed: {e}[/red]")
-            break
-
-        if not batch:
-            break
-
+    for batch in paginate_active_markets(max_pages=pages, min_volume_24h=10):
         for m in batch:
             if "highest-temperature" not in (m.get("slug") or "").lower():
                 continue
@@ -128,11 +100,6 @@ def fetch_weather_markets(pages: int = 25) -> list[dict]:
                 "end_date":     m.get("endDateIso") or m.get("endDate") or "",
                 "market_url":   f"https://polymarket.com/event/{slug}" if slug else "",
             })
-
-        if batch and float(batch[-1].get("volume24hr") or 0) < 10:
-            break
-        if len(batch) < per_page:
-            break
 
     return markets
 

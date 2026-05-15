@@ -372,31 +372,12 @@ class WeatherLayer(BaseLayer):
 
     def _fetch_top_market_ids(self) -> set[str]:
         """Fetch top N weather markets by 24h volume from Polymarket."""
-        import json, requests as _req
-        top_n   = WEATHER.get("top_n_markets", 15)
-        session = _req.Session()
-        session.headers.update({"User-Agent": "weather-bot/1.0"})
+        from markets.polymarket import paginate_active_markets
+        top_n = WEATHER.get("top_n_markets", 15)
         ids: list[tuple[float, str]] = []   # (volume24hr, market_id)
 
         try:
-            for page in range(25):
-                resp = session.get(
-                    "https://gamma-api.polymarket.com/markets",
-                    params={
-                        "active":    "true",
-                        "closed":    "false",
-                        "limit":     200,
-                        "offset":    page * 200,
-                        "order":     "volume24hr",
-                        "ascending": "false",
-                    },
-                    timeout=10,
-                )
-                resp.raise_for_status()
-                batch = resp.json()
-                if not batch:
-                    break
-
+            for batch in paginate_active_markets(max_pages=25, min_volume_24h=10):
                 for m in batch:
                     if "highest-temperature" not in (m.get("slug") or "").lower():
                         continue
@@ -405,10 +386,6 @@ class WeatherLayer(BaseLayer):
                     ids.append((vol, mid))
 
                 if len(ids) >= top_n:
-                    break
-                if batch and float(batch[-1].get("volume24hr") or 0) < 10:
-                    break
-                if len(batch) < 200:
                     break
         except Exception as e:
             print(f"[weather] top-N refresh failed: {e}")

@@ -12,11 +12,9 @@ import time
 import sqlite3
 from datetime import datetime, timezone, timedelta
 
-import requests
-
-from config import DB_PATH, POLYMARKET_GAMMA_API, WEATHER
+from config import DB_PATH, WEATHER
 from db import init_db, upsert_tracked_trader
-from markets.polymarket import get_market_trades
+from markets.polymarket import get_market_trades, paginate_active_markets
 
 # ── Config (pulled from config.py WEATHER block — edit there to tune) ─────────
 
@@ -25,12 +23,8 @@ MAX_WEATHER_MARKETS   = WEATHER.get("trader_discovery_max_markets",   400)
 MAX_TRADES_PER_MARKET = WEATHER.get("trader_discovery_max_tpm",       5.0)
 MAX_AVG_ENTRY_PRICE   = WEATHER.get("trader_discovery_max_avg_price", 0.85)
 RECENCY_DAYS          = WEATHER.get("trader_discovery_recency_days",  60)
-API_DELAY          = 0.15   # seconds between market trade fetches
-GAMMA_PAGE_SIZE    = 200    # markets per Gamma API page (match weather_scanner)
-GAMMA_MAX_PAGES    = 25     # cap — weather_scanner uses 25 pages of 200
-
-_session = requests.Session()
-_session.headers.update({"User-Agent": "polymarket-bot/1.0"})
+API_DELAY             = 0.15   # seconds between market trade fetches
+GAMMA_MAX_PAGES       = 25     # cap on Gamma /markets walk depth
 
 
 # ── Step 1: Collect weather condition_ids ─────────────────────────────────────
@@ -51,41 +45,13 @@ def _condition_ids_from_gamma() -> list[str]:
     the weather_scanner uses: 'highest-temperature' in slug.
     """
     ids = []
-    for page in range(GAMMA_MAX_PAGES):
-        try:
-            resp = _session.get(
-                f"{POLYMARKET_GAMMA_API}/markets",
-                params={
-                    "active":    "true",
-                    "closed":    "false",
-                    "limit":     GAMMA_PAGE_SIZE,
-                    "offset":    page * GAMMA_PAGE_SIZE,
-                    "order":     "volume24hr",
-                    "ascending": "false",
-                },
-                timeout=15,
-            )
-            resp.raise_for_status()
-            markets = resp.json()
-        except Exception as e:
-            print(f"  [gamma] page {page} failed: {e}")
-            break
-
-        if not markets:
-            break
-
-        for m in markets:
+    for batch in paginate_active_markets(max_pages=GAMMA_MAX_PAGES, request_delay_sec=0.1):
+        for m in batch:
             if "highest-temperature" not in (m.get("slug") or "").lower():
                 continue
             cid = m.get("conditionId") or m.get("id")
             if cid:
                 ids.append(cid)
-
-        if len(markets) < GAMMA_PAGE_SIZE:
-            break
-
-        time.sleep(0.1)
-
     return ids
 
 

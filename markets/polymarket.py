@@ -1,4 +1,5 @@
 import json
+from typing import Iterator
 import requests
 from datetime import datetime, timezone
 from config import (
@@ -90,6 +91,81 @@ def _parse_json_field(value) -> list:
         return json.loads(value)
     except Exception:
         return []
+
+
+def paginate_active_markets(
+    *,
+    max_pages: int = 25,
+    page_size: int = 100,
+    order: str = "volume24hr",
+    ascending: bool = False,
+    min_volume_24h: float | None = None,
+    request_delay_sec: float = 0.0,
+) -> Iterator[list[dict]]:
+    """
+    Yield batches of active, unclosed markets from Gamma /markets.
+
+    Polymarket caps `limit` at 100 per request (observed 2026-05-15). This
+    helper advances `offset` by the actual size of each returned batch and
+    terminates when the API returns an empty batch OR fewer markets than
+    `page_size` — the real end-of-data signal. That keeps the walk correct
+    if Polymarket changes the cap again.
+
+    Yields each batch incrementally so callers can filter without holding
+    the whole walk in memory.
+
+    Args:
+        max_pages:        hard ceiling on number of HTTP requests.
+        page_size:        requested limit per request (API may return fewer).
+        order:            sort field forwarded to Gamma.
+        ascending:        sort direction.
+        min_volume_24h:   if set, stop once the last item on a page falls
+                          below this floor (only sensible for volume-sorted
+                          descending walks).
+        request_delay_sec: optional sleep between requests for politeness.
+    """
+    import time as _time
+    offset = 0
+    for page in range(max_pages):
+        try:
+            resp = _session.get(
+                f"{POLYMARKET_GAMMA_API}/markets",
+                params={
+                    "active":    "true",
+                    "closed":    "false",
+                    "limit":     page_size,
+                    "offset":    offset,
+                    "order":     order,
+                    "ascending": "true" if ascending else "false",
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            batch = resp.json()
+        except Exception as e:
+            print(f"[polymarket] paginate page {page} (offset={offset}) failed: {e}")
+            return
+
+        if not batch:
+            return
+
+        yield batch
+
+        got = len(batch)
+        offset += got
+
+        if got < page_size:
+            return
+
+        if min_volume_24h is not None:
+            try:
+                if float(batch[-1].get("volume24hr") or 0) < min_volume_24h:
+                    return
+            except (TypeError, ValueError):
+                pass
+
+        if request_delay_sec > 0:
+            _time.sleep(request_delay_sec)
 
 
 def simulate_fill(token_id: str, size_usdc: float, mid_price: float) -> tuple[float, float, float]:
