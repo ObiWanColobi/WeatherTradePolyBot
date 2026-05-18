@@ -173,8 +173,13 @@ def iter_weather_markets(
 
     Per-event responses are cached for 15 min (see _EVENT_CACHE_TTL_SEC).
     Cold-pass cost: ~len(cities) * (days_ahead + 1) * len(kinds) requests.
+
+    Past-close events are filtered out: Polymarket leaves them
+    `acceptingOrders=True` through UMA resolution but the bot can't enter
+    them (entry_min_hours_to_close gate) and many have dead CLOB books.
     """
     today = datetime.now(timezone.utc).date()
+    now_iso = datetime.now(timezone.utc).isoformat()
     for city in cities:
         cslug = _city_to_slug(city)
         for delta in range(days_ahead + 1):
@@ -187,6 +192,10 @@ def iter_weather_markets(
                     continue
                 event_slug = event.get("slug") or ""
                 event_end  = event.get("endDate") or ""
+                if event_end and event_end < now_iso:
+                    if request_delay_sec > 0:
+                        _time.sleep(request_delay_sec)
+                    continue
                 for m in event.get("markets") or []:
                     if isinstance(m, dict):
                         m["_event_slug"] = event_slug
