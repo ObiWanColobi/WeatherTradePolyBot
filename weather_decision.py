@@ -25,6 +25,7 @@ Usage (called by weather_bot.py each poll):
 """
 from dataclasses import dataclass, field
 
+from calibration import apply_platt
 from config import WEATHER
 import db
 from markets.polymarket import simulate_fill
@@ -55,6 +56,13 @@ _MIN_NET_EDGE        = WEATHER.get("entry_min_net_edge_pct",      0.05)
 # kept there; replicated here only for scoring, not for actual sizing)
 _HORIZON_DISCOUNTS  = {0: 1.00, 1: 0.85, 2: 0.65}
 _HORIZON_DEFAULT    = 0.45
+
+
+def _calibrated_prob(raw_prob: float) -> float:
+    """Apply Platt calibration when platt_enabled is on; else return raw."""
+    if WEATHER.get("platt_enabled"):
+        return apply_platt(raw_prob)
+    return raw_prob
 
 
 @dataclass
@@ -106,7 +114,16 @@ def evaluate(
         city      = candidate.get("city", "").lower()
         mkt_price = candidate["market_price"]
         mdl_prob  = candidate["model_prob"]
-        direction = "yes" if mdl_prob > mkt_price else "no"
+        # Platt calibration is opt-in via WEATHER["platt_enabled"]. When off,
+        # cal_prob == mdl_prob and behavior is identical to pre-Platt. When on,
+        # cal_prob is used for direction, edge gate, and Kelly sizing; mdl_prob
+        # is retained for the sizing_decision audit row.
+        cal_prob  = _calibrated_prob(mdl_prob)
+        if WEATHER.get("platt_enabled"):
+            _sd = candidate.get("_scan_data")
+            if isinstance(_sd, dict):
+                _sd["edge_prob"] = abs(cal_prob - mkt_price)
+        direction = "yes" if cal_prob > mkt_price else "no"
 
         # ── 0a. YES trades disabled (2026-04-15 — trade review) ──────────────
         if direction == "yes":
@@ -210,7 +227,7 @@ def evaluate(
         scan_data       = candidate.get("_scan_data") or {}
         ens_margin_c    = scan_data.get("ensemble_margin_c")
         size, sizing_diag = kelly_size_with_diagnostics(
-            balance, mdl_prob, mkt_price, direction, ens_n, days,
+            balance, cal_prob, mkt_price, direction, ens_n, days,
             unanimous=is_unanimous,
             ensemble_margin_c=ens_margin_c,
         )
@@ -315,7 +332,10 @@ def evaluate(
 
         unanimous_tag = " [unanimous]" if is_unanimous else ""
         # E1-06: log raw + calibrated probability separately + fixed-mode reference.
-        # Until Phase 3 Platt calibration ships, raw_prob == calibrated_prob == model_prob.
+        # raw_prob is the unmodified GEFS-31 P(YES); calibrated_prob is the
+        # Platt-adjusted value used by direction call, entry gate, and Kelly
+        # sizing when WEATHER["platt_enabled"] is true. When the flag is off,
+        # cal_prob == mdl_prob and the two columns match.
         # fixed_mode_stake_usdc is the E15.4 fixed_50 baseline, captured for later
         # Kelly-vs-fixed-stake research on real trade outcomes.
         sizing_id: int | None = None
@@ -336,7 +356,7 @@ def evaluate(
                 "slippage_reduced_to":    slippage_reduced_to,
                 "final_size":             size,
                 "raw_prob":               mdl_prob,
-                "calibrated_prob":        mdl_prob,
+                "calibrated_prob":        cal_prob,
                 "fixed_mode_stake_usdc":  50.0,
             })
         except Exception as e:
