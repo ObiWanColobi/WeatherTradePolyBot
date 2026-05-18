@@ -302,6 +302,7 @@ def run_entry_pass(already_traded: set, max_bet: float, dry_run: bool = False) -
             "entry_ensemble_yes": c.get("ens_yes"),
             "entry_ensemble_n":   c.get("ens_n"),
             "threshold":          c["_scan_data"].get("target_str"),
+            "sizing_id":          result.sizing_id,
         }
 
         filled = _executor.place_order(

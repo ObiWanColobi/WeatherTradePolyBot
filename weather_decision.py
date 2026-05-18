@@ -72,6 +72,7 @@ class DecisionResult:
     score:      float = 0.0
     size_usdc:  float = 0.0
     checks:     dict  = field(default_factory=dict)
+    sizing_id:  int | None = None  # sizing_decisions.id; threaded to executor for trade_id linkage
 
 
 def evaluate(
@@ -375,6 +376,7 @@ def evaluate(
             score=score,
             size_usdc=size,
             checks=entry.checks,
+            sizing_id=sizing_id,
         ))
 
     # Best score first among approved

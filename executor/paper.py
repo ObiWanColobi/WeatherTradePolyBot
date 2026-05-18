@@ -110,9 +110,20 @@ class PaperExecutor(BaseExecutor):
             "exit_reason":        None,
         }
 
-        db.insert_trade(trade)
+        trade_id = db.insert_trade(trade)
         db.update_balance(-filled_usdc)
         db.record_account_value()
+
+        # Link this trade back to the sizing_decision that authorized it, so
+        # downstream A/B + Phase 3 attribution can join the chain
+        # sizing_decisions -> trades. Wrapped — link failure must NOT block
+        # the trade flow. See feedback_verify_writer_has_callers.md.
+        sizing_id = estimate.get("sizing_id") if isinstance(estimate, dict) else None
+        if sizing_id is not None and trade_id is not None:
+            try:
+                db.link_sizing_decision_to_trade(int(sizing_id), int(trade_id))
+            except Exception as e:
+                print(f"[paper] sizing<->trade link failed sizing_id={sizing_id} trade_id={trade_id}: {e}")
 
         try:
             snap = db.snapshot_trader_forecasts_on_entry(
