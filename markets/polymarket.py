@@ -329,14 +329,35 @@ def simulate_fill(token_id: str, size_usdc: float, mid_price: float) -> tuple[fl
     return avg_fill, slippage_pct, fillable_usdc
 
 
+# Tokens whose CLOB orderbook has been observed 404 ("no orderbook exists for
+# the requested token id"). Common for Polymarket weather markets whose makers
+# have all cancelled — Gamma still reports a bestBid/bestAsk from the last
+# known book, but CLOB returns 404. We cache the dead-book state so the bot's
+# poll loop doesn't hammer /book 50× per minute for the same dead token.
+_DEAD_BOOK_CACHE: dict[str, float] = {}
+_DEAD_BOOK_TTL_SEC = 5 * 60
+
+
 def get_orderbook(token_id: str) -> dict:
-    """Fetch the live order book for a YES token. Used by the fill simulator."""
+    """Fetch the live order book for a YES token. Used by the fill simulator.
+
+    Returns an empty book on 404 (token has no live orderbook on CLOB — an
+    expected condition for low-liquidity weather markets, not an error worth
+    logging). Caches dead-book tokens for 5 min to keep poll-loop noise down.
+    """
+    now_ts = _time.time()
+    cached = _DEAD_BOOK_CACHE.get(token_id)
+    if cached and (now_ts - cached) < _DEAD_BOOK_TTL_SEC:
+        return {"bids": [], "asks": []}
     try:
         resp = _session.get(
             f"{POLYMARKET_CLOB_API}/book",
             params={"token_id": token_id},
             timeout=10,
         )
+        if resp.status_code == 404:
+            _DEAD_BOOK_CACHE[token_id] = now_ts
+            return {"bids": [], "asks": []}
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
