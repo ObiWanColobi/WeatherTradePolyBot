@@ -290,18 +290,6 @@ WEATHER = {
 
     # Live override — defaults identical to paper for Phase 1; tune post-shadow
     "live_metar_exit_on_lock":     os.getenv("LIVE_METAR_EXIT_ON_LOCK", "false").lower() == "true",
-
-    # ╔═══════════════════════════════════════════════════════════════════════════╗
-    # ║  PLATT CALIBRATION  (V1-fit shipped 416a170; wired into decision/sizing  ║
-    # ║  in subsequent commits — Tasks 4/5 of the Platt deployment plan).         ║
-    # ║  Defaults OFF: bot keeps using raw_prob until LIVE_PLATT_ENABLED=true.   ║
-    # ║  HALF_SIZE defaults ON: when Platt is enabled, halve Kelly stake during  ║
-    # ║  the 2-week A/B period.                                                  ║
-    # ╚═══════════════════════════════════════════════════════════════════════════╝
-    "platt_enabled":               os.getenv("PLATT_ENABLED",      "false").lower() == "true",
-    "platt_half_size":             os.getenv("PLATT_HALF_SIZE",    "true").lower()  == "true",
-    "live_platt_enabled":          os.getenv("LIVE_PLATT_ENABLED", "false").lower() == "true",
-    "live_platt_half_size":        os.getenv("LIVE_PLATT_HALF_SIZE", "true").lower() == "true",
 }
 
 # ── API Endpoints ─────────────────────────────────────────────────────────────
@@ -325,8 +313,6 @@ _LIVE_OVERRIDES = {
     "risk_daily_loss_limit_pct":    "live_risk_daily_loss_limit_pct",
     "risk_auto_reset":              "live_risk_auto_reset",
     "metar_exit_on_lock":           "live_metar_exit_on_lock",
-    "platt_enabled":                "live_platt_enabled",
-    "platt_half_size":              "live_platt_half_size",
 }
 
 _overrides_applied = False

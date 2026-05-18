@@ -59,10 +59,8 @@ _HORIZON_DEFAULT    = 0.45
 
 
 def _calibrated_prob(raw_prob: float) -> float:
-    """Apply Platt calibration when platt_enabled is on; else return raw."""
-    if WEATHER.get("platt_enabled"):
-        return apply_platt(raw_prob)
-    return raw_prob
+    """Apply V1-fit Platt sigmoid to a raw GEFS-31 P(YES)."""
+    return apply_platt(raw_prob)
 
 
 @dataclass
@@ -114,15 +112,12 @@ def evaluate(
         city      = candidate.get("city", "").lower()
         mkt_price = candidate["market_price"]
         mdl_prob  = candidate["model_prob"]
-        # Platt calibration is opt-in via WEATHER["platt_enabled"]. When off,
-        # cal_prob == mdl_prob and behavior is identical to pre-Platt. When on,
-        # cal_prob is used for direction, edge gate, and Kelly sizing; mdl_prob
-        # is retained for the sizing_decision audit row.
+        # Platt-calibrated probability drives direction, entry gate edge, and
+        # Kelly sizing. mdl_prob is kept for the sizing_decision audit row.
         cal_prob  = _calibrated_prob(mdl_prob)
-        if WEATHER.get("platt_enabled"):
-            _sd = candidate.get("_scan_data")
-            if isinstance(_sd, dict):
-                _sd["edge_prob"] = abs(cal_prob - mkt_price)
+        _sd = candidate.get("_scan_data")
+        if isinstance(_sd, dict):
+            _sd["edge_prob"] = abs(cal_prob - mkt_price)
         direction = "yes" if cal_prob > mkt_price else "no"
 
         # ── 0a. YES trades disabled (2026-04-15 — trade review) ──────────────
@@ -331,13 +326,9 @@ def evaluate(
         provisional_exposure += size
 
         unanimous_tag = " [unanimous]" if is_unanimous else ""
-        # E1-06: log raw + calibrated probability separately + fixed-mode reference.
-        # raw_prob is the unmodified GEFS-31 P(YES); calibrated_prob is the
-        # Platt-adjusted value used by direction call, entry gate, and Kelly
-        # sizing when WEATHER["platt_enabled"] is true. When the flag is off,
-        # cal_prob == mdl_prob and the two columns match.
-        # fixed_mode_stake_usdc is the E15.4 fixed_50 baseline, captured for later
-        # Kelly-vs-fixed-stake research on real trade outcomes.
+        # raw_prob = unmodified GEFS-31 P(YES); calibrated_prob = Platt-adjusted
+        # value actually used by direction / edge gate / Kelly. fixed_mode_stake_usdc
+        # is the E15.4 fixed_50 baseline for Kelly-vs-fixed-stake research.
         sizing_id: int | None = None
         try:
             sizing_id = db.write_sizing_decision({

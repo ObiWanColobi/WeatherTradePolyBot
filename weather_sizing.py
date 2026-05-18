@@ -144,15 +144,6 @@ def kelly_size_with_diagnostics(
     diag["size_after_caps"]    = round(size, 2)
     diag["binding_constraint"] = binding
 
-    # Platt A/B half-size gate: when platt_enabled+platt_half_size are both on,
-    # halve the post-cap stake. This is the temporary risk-reducer during the
-    # 2-week A/B period. Set platt_half_size=false in env to ramp to full size.
-    half_size_applied = bool(WEATHER.get("platt_enabled")) and bool(WEATHER.get("platt_half_size"))
-    if half_size_applied:
-        size *= 0.5
-        diag["binding_constraint"] = "platt_half_size"
-    diag["platt_half_size_applied"] = half_size_applied
-
     if size < _MIN_BET_USDC:
         diag["binding_constraint"] = "min_bet_floor"
         return 0.0, diag
