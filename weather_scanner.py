@@ -32,7 +32,7 @@ from rich.text import Text
 from rich.table import Table
 
 from layers.layer3_weather import WeatherLayer
-from markets.polymarket import paginate_active_markets
+from markets.polymarket import iter_weather_markets
 from config import WEATHER
 
 console = Console(legacy_windows=False)
@@ -60,47 +60,59 @@ def _parse_json_field(value) -> list:
 
 def fetch_weather_markets(pages: int = 25) -> list[dict]:
     """
-    Fetch active Polymarket markets with 'highest-temperature' in slug.
+    Fetch threshold weather markets for the configured top_cities via
+    deterministic slug discovery (`/events/slug/{slug}`).
+
+    `pages` is preserved for API stability with the prior paginate-based
+    implementation but no longer applies — discovery now reads one event
+    per (city × forward-day × kind) probe.
+
     Sorted by volume24hr descending so top markets surface early.
     """
+    cities = WEATHER.get("top_cities", [])
     markets = []
 
-    for batch in paginate_active_markets(max_pages=pages, min_volume_24h=10):
-        for m in batch:
-            if "highest-temperature" not in (m.get("slug") or "").lower():
-                continue
+    for m in iter_weather_markets(cities, days_ahead=2):
+        # Only threshold markets — the parent-event slug always starts with
+        # `highest-temperature-in-` or `lowest-temperature-in-`.
+        slug_check = (m.get("slug") or m.get("_event_slug") or "").lower()
+        if "highest-temperature" not in slug_check and "lowest-temperature" not in slug_check:
+            continue
 
-            outcomes  = _parse_json_field(m.get("outcomes",      "[]"))
-            prices    = _parse_json_field(m.get("outcomePrices", "[]"))
-            token_ids = _parse_json_field(m.get("clobTokenIds",  "[]"))
+        outcomes  = _parse_json_field(m.get("outcomes",      "[]"))
+        prices    = _parse_json_field(m.get("outcomePrices", "[]"))
+        token_ids = _parse_json_field(m.get("clobTokenIds",  "[]"))
 
-            yes_idx = next(
-                (i for i, o in enumerate(outcomes) if str(o).lower() == "yes"), None
-            )
-            no_idx = next(
-                (i for i, o in enumerate(outcomes) if str(o).lower() == "no"), None
-            )
-            if yes_idx is None or yes_idx >= len(prices):
-                continue
+        yes_idx = next(
+            (i for i, o in enumerate(outcomes) if str(o).lower() == "yes"), None
+        )
+        no_idx = next(
+            (i for i, o in enumerate(outcomes) if str(o).lower() == "no"), None
+        )
+        if yes_idx is None or yes_idx >= len(prices):
+            continue
 
+        try:
             price = float(prices[yes_idx])
-            if not (0 < price < 1):
-                continue
+        except (TypeError, ValueError):
+            continue
+        if not (0 < price < 1):
+            continue
 
-            events = m.get("events") or []
-            slug = (events[0].get("slug") if events else None) or m.get("slug") or ""
-            markets.append({
-                "id":           m.get("conditionId") or m.get("id"),
-                "question":     m.get("question", ""),
-                "token_id":     token_ids[yes_idx] if yes_idx < len(token_ids) else None,
-                "no_token_id":  token_ids[no_idx]  if no_idx  is not None and no_idx  < len(token_ids) else None,
-                "price":        price,
-                "liquidity":    float(m.get("liquidityNum") or m.get("liquidity") or 0),
-                "volume":       float(m.get("volume24hr") or m.get("volumeNum") or 0),
-                "end_date":     m.get("endDateIso") or m.get("endDate") or "",
-                "market_url":   f"https://polymarket.com/event/{slug}" if slug else "",
-            })
+        event_slug = m.get("_event_slug") or ""
+        markets.append({
+            "id":           m.get("conditionId") or m.get("id"),
+            "question":     m.get("question", ""),
+            "token_id":     token_ids[yes_idx] if yes_idx < len(token_ids) else None,
+            "no_token_id":  token_ids[no_idx]  if no_idx  is not None and no_idx  < len(token_ids) else None,
+            "price":        price,
+            "liquidity":    float(m.get("liquidityNum") or m.get("liquidity") or 0),
+            "volume":       float(m.get("volume24hr") or m.get("volumeNum") or 0),
+            "end_date":     m.get("_event_end") or m.get("endDateIso") or m.get("endDate") or "",
+            "market_url":   f"https://polymarket.com/event/{event_slug}" if event_slug else "",
+        })
 
+    markets.sort(key=lambda x: x.get("volume") or 0, reverse=True)
     return markets
 
 

@@ -14,7 +14,7 @@ from datetime import datetime, timezone, timedelta
 
 from config import DB_PATH, WEATHER
 from db import init_db, upsert_tracked_trader
-from markets.polymarket import get_market_trades, paginate_active_markets
+from markets.polymarket import get_market_trades, iter_weather_markets
 
 # ── Config (pulled from config.py WEATHER block — edit there to tune) ─────────
 
@@ -24,7 +24,6 @@ MAX_TRADES_PER_MARKET = WEATHER.get("trader_discovery_max_tpm",       5.0)
 MAX_AVG_ENTRY_PRICE   = WEATHER.get("trader_discovery_max_avg_price", 0.85)
 RECENCY_DAYS          = WEATHER.get("trader_discovery_recency_days",  60)
 API_DELAY             = 0.15   # seconds between market trade fetches
-GAMMA_MAX_PAGES       = 25     # cap on Gamma /markets walk depth
 
 
 # ── Step 1: Collect weather condition_ids ─────────────────────────────────────
@@ -41,17 +40,22 @@ def _condition_ids_from_trades_db() -> list[str]:
 
 def _condition_ids_from_gamma() -> list[str]:
     """
-    Fetch weather market condition IDs from Gamma using the same slug filter
-    the weather_scanner uses: 'highest-temperature' in slug.
+    Fetch weather market condition IDs via deterministic slug discovery
+    (`/events/slug/{slug}`) across the catalog city universe + a wide
+    forward window — same data path as the scanner/catalog.
+
+    Name preserved for back-compat though the source is no longer Gamma's
+    `/markets` index walk (broken 2026-05-15).
     """
-    ids = []
-    for batch in paginate_active_markets(max_pages=GAMMA_MAX_PAGES, request_delay_sec=0.1):
-        for m in batch:
-            if "highest-temperature" not in (m.get("slug") or "").lower():
-                continue
-            cid = m.get("conditionId") or m.get("id")
-            if cid:
-                ids.append(cid)
+    cities = WEATHER.get("catalog_cities") or WEATHER.get("top_cities", [])
+    ids: list[str] = []
+    for m in iter_weather_markets(cities, days_ahead=6, request_delay_sec=0.1):
+        slug_check = (m.get("slug") or m.get("_event_slug") or "").lower()
+        if "highest-temperature" not in slug_check and "lowest-temperature" not in slug_check:
+            continue
+        cid = m.get("conditionId") or m.get("id")
+        if cid:
+            ids.append(cid)
     return ids
 
 

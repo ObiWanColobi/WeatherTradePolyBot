@@ -58,6 +58,29 @@ WEATHER = {
         "taipei", "ankara", "tokyo", "seattle",
     ],
 
+    # Polymarket slug overrides (non-default city → slug mappings).
+    # Default is city.lower().replace(" ", "-"); only list exceptions here.
+    # Resolved 2026-05-18 by scripts/verify_city_slugs.py.
+    "city_slugs": {
+        "new york city": "nyc",
+    },
+
+    # Catalog discovery universe — every city Polymarket lists temperature
+    # markets for, verified 2026-05-18 by scripts/verify_city_slugs.py.
+    # Used by weather_catalog to snapshot the full universe; scanner stays
+    # on top_cities. Re-run the verifier periodically to detect new cities.
+    "catalog_cities": [
+        "amsterdam", "ankara", "atlanta", "austin", "beijing",
+        "buenos aires", "chengdu", "chicago", "dallas", "denver",
+        "helsinki", "hong kong", "houston", "istanbul", "jakarta",
+        "karachi", "london", "los angeles", "lucknow", "madrid",
+        "mexico city", "miami", "milan", "moscow", "munich",
+        "new york city", "paris", "san francisco", "sao paulo",
+        "seattle", "seoul", "shanghai", "shenzhen", "singapore",
+        "taipei", "tel aviv", "tokyo", "toronto", "warsaw",
+        "wellington", "wuhan",
+    ],
+
     # Top N markets the bot will actually evaluate for trades.
     # All others are ignored by estimate() to avoid wasting API calls.
     # Candidates are ranked by 24h volume and refreshed on each WeatherLayer.refresh() call.

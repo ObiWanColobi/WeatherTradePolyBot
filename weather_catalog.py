@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 import db
 from layers.layer3_weather import WeatherLayer
 from config import WEATHER
-from markets.polymarket import get_resolution_status, paginate_active_markets
+from markets.polymarket import get_resolution_status, iter_weather_markets
 
 _layer = WeatherLayer()
 
@@ -38,33 +38,45 @@ def _parse_json_field(value) -> list:
 
 
 def fetch_all_weather_markets() -> list[dict]:
-    """Fetch all active threshold weather markets regardless of volume."""
+    """Fetch all threshold weather markets across the catalog city universe
+    via deterministic slug discovery.
+
+    Walks WEATHER["catalog_cities"] × forward 4 days × {highest, lowest},
+    pulling event-level data from /events/slug/{slug}. Replaces the prior
+    Gamma /markets index walk (broken since 2026-05-15 — see plan
+    tasks/plans/2026-05-18_polymarket_slug_based_discovery.md).
+    """
+    cities = WEATHER.get("catalog_cities") or WEATHER.get("top_cities", [])
     markets = []
 
-    for batch in paginate_active_markets(max_pages=40, min_volume_24h=1):
-        for m in batch:
-            if "highest-temperature" not in (m.get("slug") or "").lower():
-                continue
+    for m in iter_weather_markets(cities, days_ahead=4):
+        slug_check = (m.get("slug") or m.get("_event_slug") or "").lower()
+        if "highest-temperature" not in slug_check and "lowest-temperature" not in slug_check:
+            continue
 
-            outcomes  = _parse_json_field(m.get("outcomes",      "[]"))
-            prices    = _parse_json_field(m.get("outcomePrices", "[]"))
-            token_ids = _parse_json_field(m.get("clobTokenIds",  "[]"))
+        outcomes  = _parse_json_field(m.get("outcomes",      "[]"))
+        prices    = _parse_json_field(m.get("outcomePrices", "[]"))
+        token_ids = _parse_json_field(m.get("clobTokenIds",  "[]"))
 
-            yes_idx = next(
-                (i for i, o in enumerate(outcomes) if str(o).lower() == "yes"), None
-            )
-            if yes_idx is None or yes_idx >= len(prices):
-                continue
+        yes_idx = next(
+            (i for i, o in enumerate(outcomes) if str(o).lower() == "yes"), None
+        )
+        if yes_idx is None or yes_idx >= len(prices):
+            continue
 
+        try:
             price = float(prices[yes_idx])
-            markets.append({
-                "id":       m.get("conditionId") or m.get("id"),
-                "question": m.get("question", ""),
-                "token_id": token_ids[yes_idx] if yes_idx < len(token_ids) else None,
-                "price":    price,
-                "volume":   float(m.get("volume24hr") or 0),
-                "end_date": m.get("endDateIso") or m.get("endDate") or "",
-            })
+        except (TypeError, ValueError):
+            continue
+
+        markets.append({
+            "id":       m.get("conditionId") or m.get("id"),
+            "question": m.get("question", ""),
+            "token_id": token_ids[yes_idx] if yes_idx < len(token_ids) else None,
+            "price":    price,
+            "volume":   float(m.get("volume24hr") or 0),
+            "end_date": m.get("_event_end") or m.get("endDateIso") or m.get("endDate") or "",
+        })
 
     return markets
 

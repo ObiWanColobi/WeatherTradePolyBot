@@ -1,7 +1,8 @@
 import json
+import time as _time
 from typing import Iterator
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from config import (
     POLYMARKET_GAMMA_API,
     POLYMARKET_CLOB_API,
@@ -9,13 +10,34 @@ from config import (
     MIN_LIQUIDITY_USDC,
     MAX_HOURS_TO_CLOSE,
     MIN_HOURS_TO_CLOSE,
+    WEATHER,
 )
 
 _session = requests.Session()
 _session.headers.update({"User-Agent": "polymarket-bot/1.0"})
 
+_MONTHS = ['january','february','march','april','may','june','july',
+          'august','september','october','november','december']
+
+# Per-event cache so the 60-second poll loop doesn't redo 144 HTTP requests
+# every cycle. Events themselves rarely change once created; the bot polls
+# token midpoint / orderbook directly for live price data.
+_EVENT_CACHE: dict[str, tuple[float, dict | None]] = {}
+_EVENT_CACHE_TTL_SEC = 15 * 60   # 15 min
+
+
+def _city_to_slug(city: str) -> str:
+    """Normalise a city name to its Polymarket slug. Reads overrides from
+    WEATHER['city_slugs']; defaults to lower+hyphenated."""
+    c = (city or "").lower().strip()
+    overrides = WEATHER.get("city_slugs") or {}
+    return overrides.get(c, c.replace(" ", "-"))
+
 
 def get_active_markets(limit: int = 100, offset: int = 0) -> list[dict]:
+    # DEPRECATED for weather discovery (2026-05-18) — see paginate_active_markets
+    # docstring for the index-freeze details. Currently unused in the bot;
+    # retained for general-market lookups.
     try:
         resp = _session.get(
             f"{POLYMARKET_GAMMA_API}/markets",
@@ -93,6 +115,87 @@ def _parse_json_field(value) -> list:
         return []
 
 
+def fetch_weather_event(city_slug: str, date, kind: str = "highest") -> dict | None:
+    """Fetch a single Polymarket daily-temperature event by deterministic slug.
+
+    Returns the full event dict (with nested `markets`) or None on miss /
+    HTTP error. Cached in `_EVENT_CACHE` with 15-min TTL.
+
+    Slug pattern observed 2026-05-18 (after Gamma index froze for new weather
+    events): `{kind}-temperature-in-{city_slug}-on-{month}-{day}-{year}`,
+    where kind ∈ {highest, lowest} and month is lowercased English name.
+    """
+    event_slug = (
+        f"{kind}-temperature-in-{city_slug}-on-"
+        f"{_MONTHS[date.month - 1]}-{date.day}-{date.year}"
+    )
+    now_ts = _time.time()
+    cached = _EVENT_CACHE.get(event_slug)
+    if cached and (now_ts - cached[0]) < _EVENT_CACHE_TTL_SEC:
+        return cached[1]
+
+    try:
+        resp = _session.get(
+            f"{POLYMARKET_GAMMA_API}/events/slug/{event_slug}",
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            _EVENT_CACHE[event_slug] = (now_ts, None)
+            return None
+        body = resp.json()
+    except Exception as e:
+        print(f"[polymarket] fetch_weather_event({event_slug}) failed: {e}")
+        _EVENT_CACHE[event_slug] = (now_ts, None)
+        return None
+
+    if not body or not isinstance(body, dict) or not body.get("markets"):
+        _EVENT_CACHE[event_slug] = (now_ts, None)
+        return None
+
+    _EVENT_CACHE[event_slug] = (now_ts, body)
+    return body
+
+
+def iter_weather_markets(
+    cities: list[str],
+    *,
+    days_ahead: int = 2,
+    kinds: tuple[str, ...] = ("highest", "lowest"),
+    request_delay_sec: float = 0.03,
+) -> Iterator[dict]:
+    """Yield raw Polymarket market dicts for the (cities × forward-days × kinds)
+    grid, discovered via direct `/events/slug/{slug}` lookups.
+
+    Each yielded dict is a market from `event["markets"]` with two extra keys
+    injected for downstream convenience:
+        _event_slug : str — the parent event slug
+        _event_end  : str — the event endDate (ISO)
+
+    Per-event responses are cached for 15 min (see _EVENT_CACHE_TTL_SEC).
+    Cold-pass cost: ~len(cities) * (days_ahead + 1) * len(kinds) requests.
+    """
+    today = datetime.now(timezone.utc).date()
+    for city in cities:
+        cslug = _city_to_slug(city)
+        for delta in range(days_ahead + 1):
+            d = today + timedelta(days=delta)
+            for kind in kinds:
+                event = fetch_weather_event(cslug, d, kind=kind)
+                if not event:
+                    if request_delay_sec > 0:
+                        _time.sleep(request_delay_sec)
+                    continue
+                event_slug = event.get("slug") or ""
+                event_end  = event.get("endDate") or ""
+                for m in event.get("markets") or []:
+                    if isinstance(m, dict):
+                        m["_event_slug"] = event_slug
+                        m["_event_end"]  = event_end
+                        yield m
+                if request_delay_sec > 0:
+                    _time.sleep(request_delay_sec)
+
+
 def paginate_active_markets(
     *,
     max_pages: int = 25,
@@ -103,6 +206,16 @@ def paginate_active_markets(
     request_delay_sec: float = 0.0,
 ) -> Iterator[list[dict]]:
     """
+    DEPRECATED for weather-market discovery (2026-05-18).
+    Polymarket's Gamma `/markets` index stopped admitting new daily-weather
+    events around 2026-05-13 — they are created with
+    `active=False, archived=True, accepting_orders=True` and excluded from
+    every `/markets?…` query regardless of filter combination. Use
+    `iter_weather_markets()` for any weather discovery.
+
+    Still valid for non-weather Gamma walks (e.g. trader_discovery's wallet
+    harvest across general markets).
+
     Yield batches of active, unclosed markets from Gamma /markets.
 
     Polymarket caps `limit` at 100 per request (observed 2026-05-15). This

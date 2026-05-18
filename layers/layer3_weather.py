@@ -371,22 +371,25 @@ class WeatherLayer(BaseLayer):
         self._top_market_ids: set[str] = set()   # populated by refresh()
 
     def _fetch_top_market_ids(self) -> set[str]:
-        """Fetch top N weather markets by 24h volume from Polymarket."""
-        from markets.polymarket import paginate_active_markets
+        """Fetch top N weather markets by 24h volume via slug-based discovery.
+
+        Uses the shared 15-min event cache in markets.polymarket so this and
+        the scanner's poll loop share HTTP calls.
+        """
+        from markets.polymarket import iter_weather_markets
         top_n = WEATHER.get("top_n_markets", 15)
+        cities = WEATHER.get("top_cities", [])
         ids: list[tuple[float, str]] = []   # (volume24hr, market_id)
 
         try:
-            for batch in paginate_active_markets(max_pages=25, min_volume_24h=10):
-                for m in batch:
-                    if "highest-temperature" not in (m.get("slug") or "").lower():
-                        continue
-                    vol = float(m.get("volume24hr") or 0)
-                    mid = m.get("conditionId") or m.get("id", "")
+            for m in iter_weather_markets(cities, days_ahead=2):
+                slug_check = (m.get("slug") or m.get("_event_slug") or "").lower()
+                if "highest-temperature" not in slug_check and "lowest-temperature" not in slug_check:
+                    continue
+                vol = float(m.get("volume24hr") or 0)
+                mid = m.get("conditionId") or m.get("id", "")
+                if mid:
                     ids.append((vol, mid))
-
-                if len(ids) >= top_n:
-                    break
         except Exception as e:
             print(f"[weather] top-N refresh failed: {e}")
 
