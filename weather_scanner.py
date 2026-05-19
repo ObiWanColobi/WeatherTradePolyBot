@@ -45,6 +45,7 @@ _MIN_EDGE_PCT   = WEATHER.get("scanner_min_edge_pct",      0.05)
 _MIN_VOLUME     = WEATHER.get("scanner_min_volume",        5000)
 _MIN_VOLUME_T1  = WEATHER.get("scanner_min_volume_tier1",  1000)
 _TOP_CITIES     = set(WEATHER.get("top_cities", []))
+_MIN_HOURS_TO_CLOSE = WEATHER.get("entry_min_hours_to_close", 2.0)
 
 
 # ── Market fetching ───────────────────────────────────────────────────────────
@@ -244,12 +245,15 @@ def run_scan(include_today: bool = False, exclude_market_ids: set | None = None)
         if not (_MIN_YES <= price <= _MAX_YES):
             continue
 
-        # ── Resolve date filter ──────────────────────────────────────────────
-        resolves_str, is_today, days_out = _resolves_str(market["end_date"])
-        if is_today and not include_today:
-            continue
+        # ── Resolve date + hours-to-close ────────────────────────────────────
+        # Filter on hours_to_close, not UTC-date equality. end_date is a UTC
+        # timestamp at city-local midnight, so a UTC-date `is_today` check
+        # silently drops markets that are still hours from close right after
+        # UTC rollover (e.g. Shanghai end_date 2026-05-19T12:00Z is "today"
+        # at 00:01 UTC May 19 but has 12h left to trade). The entry layer
+        # uses the same min_hours_to_close threshold downstream.
+        resolves_str, _is_today, days_out = _resolves_str(market["end_date"])
 
-        # Hours to close — more precise than days for display and decision-making
         try:
             end_dt    = datetime.fromisoformat(market["end_date"].replace("Z", "+00:00"))
             if end_dt.tzinfo is None:
@@ -257,6 +261,9 @@ def run_scan(include_today: bool = False, exclude_market_ids: set | None = None)
             hours_to_close = max(0.0, (end_dt - datetime.now(timezone.utc)).total_seconds() / 3600)
         except Exception:
             hours_to_close = days_out * 24.0
+
+        if hours_to_close < _MIN_HOURS_TO_CLOSE and not include_today:
+            continue
 
         # ── Forecast + ensemble ──────────────────────────────────────────────
         scan_data = _layer.scan(market)
