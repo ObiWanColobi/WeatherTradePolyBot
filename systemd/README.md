@@ -2,7 +2,11 @@
 
 ## On the live VPS
 
+If the bot venv is at `/home/bot/TestCode1/venv/`, swap `/usr/bin/python3` →
+`/home/bot/TestCode1/venv/bin/python` in both `.service` files before copying.
+
 ```bash
+mkdir -p /home/bot/TestCode1/logs /home/bot/TestCode1/snapshot_parquet
 sudo cp systemd/snapshot_logger.service /etc/systemd/system/
 sudo cp systemd/snapshot_rollup.service /etc/systemd/system/
 sudo cp systemd/snapshot_rollup.timer /etc/systemd/system/
