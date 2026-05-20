@@ -39,6 +39,9 @@ _scratch/
 # ── Script run artifacts (CSV outputs, local-only) ───────────────────────────
 scripts/_out_*
 
+# ── Snapshot rollup parquet exports (local-only; rsynced off-VPS) ────────────
+snapshot_parquet/
+
 # ── Runtime state ────────────────────────────────────────────────────────────
 discovery_last_run.txt
 heartbeat.json
