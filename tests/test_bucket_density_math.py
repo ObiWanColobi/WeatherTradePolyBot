@@ -83,4 +83,4 @@ def test_deterministic_density_with_sigma_spreads():
     d = deterministic_to_density(forecast_f=70.0, sigma_f=2.0, ladder=ladder)
     n_nonzero = sum(1 for x in d if x > 0.01)
     assert n_nonzero >= 3
-    assert sum(d) == pytest.approx(1.0, abs=0.01)
+    assert sum(d) == pytest.approx(1.0)
