@@ -34,3 +34,82 @@ def test_bucket_snapshots_has_expected_columns():
     }
     missing = expected - cols
     assert not missing, f"missing columns: {missing}"
+
+
+import json
+from unittest.mock import patch
+from snapshot_logger import process_event_dict, run_one_poll
+
+
+SAMPLE_EVENT = {
+    "slug": "highest-temperature-in-nyc-on-may-20-2026",
+    "endDate": "2026-05-20T12:00:00Z",
+    "markets": [
+        {
+            "id": "12345",
+            "conditionId": "0xabc",
+            "groupItemTitle": "64-65°F",
+            "bestBid": "0.30",
+            "bestAsk": "0.35",
+            "lastTradePrice": "0.32",
+            "volume24hr": "523.4",
+            "liquidityNum": "1200.5",
+            "orderbook": None,
+        },
+        {
+            "id": "12346",
+            "conditionId": "0xdef",
+            "groupItemTitle": "74°F or higher",
+            "bestBid": "0.05",
+            "bestAsk": "0.08",
+            "lastTradePrice": "0.06",
+            "volume24hr": "300",
+            "liquidityNum": "800",
+        },
+    ],
+}
+
+
+def test_process_event_dict_yields_one_row_per_submarket():
+    rows = list(process_event_dict(SAMPLE_EVENT, snapshot_at_utc="2026-05-19T20:00:00Z"))
+    assert len(rows) == 2
+    r0 = rows[0]
+    assert r0["event_slug"] == SAMPLE_EVENT["slug"]
+    assert r0["city"] == "nyc"
+    assert r0["kind"] == "highest"
+    assert r0["resolution_date"] == "2026-05-20"
+    assert r0["group_item_title"] == "64-65°F"
+    assert r0["bound_lo_f"] == 64.0
+    assert r0["bound_hi_f"] == 65.0
+    assert r0["bucket_type"] == "range"
+    assert r0["is_open_tail"] == 0
+    assert r0["best_bid"] == 0.30
+    assert r0["best_ask"] == 0.35
+    assert abs(r0["mid_price"] - 0.325) < 0.001
+    assert r0["volume_24h"] == 523.4
+
+    r1 = rows[1]
+    assert r1["bound_lo_f"] == 74.0
+    assert r1["bound_hi_f"] is None
+    assert r1["bucket_type"] == "tail"
+    assert r1["is_open_tail"] == 1
+
+
+def test_process_event_dict_skips_non_daily_temp_events():
+    out = list(process_event_dict({"slug": "not-a-weather-event", "markets": []}, snapshot_at_utc="2026-05-19T20:00:00Z"))
+    assert out == []
+
+
+def test_run_one_poll_writes_to_db():
+    with patch("snapshot_logger.fetch_active_weather_events", return_value=[SAMPLE_EVENT]):
+        n = run_one_poll()
+    assert n == 2
+
+    conn = db.get_conn()
+    # db.get_conn() already sets row_factory = sqlite3.Row; re-assignment is harmless.
+    conn.row_factory = __import__("sqlite3").Row
+    rows = conn.execute("SELECT * FROM bucket_snapshots ORDER BY id").fetchall()
+    assert len(rows) == 2
+    assert rows[0]["event_slug"] == SAMPLE_EVENT["slug"]
+    assert rows[0]["city"] == "nyc"
+    assert rows[0]["bound_lo_f"] == 64.0
