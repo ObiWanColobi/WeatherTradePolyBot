@@ -24,6 +24,11 @@ from snapshot_parse import (
 GAMMA_API = "https://gamma-api.polymarket.com"
 POLL_INTERVAL_SEC = 300  # 5 minutes
 REQUEST_TIMEOUT_SEC = 15
+MAX_CONSECUTIVE_FAILURES = 6  # 6 * 5min = 30min of dead polls before re-raise
+
+_PAGE_SIZE = 100
+_MAX_OFFSET = 2000
+_ORDERBOOK_DEPTH = 3
 
 _session = requests.Session()
 _session.headers.update({"User-Agent": "weather-bot-snapshot/1.0"})
@@ -31,35 +36,34 @@ _session.headers.update({"User-Agent": "weather-bot-snapshot/1.0"})
 
 def fetch_active_weather_events() -> list[dict]:
     """Pull all currently-active weather-tagged events from Gamma.
-    Returns raw event dicts as returned by the API.
+
+    Raises requests.RequestException (or similar) on fetch failure so the
+    caller can distinguish a transport error from an empty result.
     """
     out: list[dict] = []
     offset = 0
     while True:
-        try:
-            r = _session.get(
-                f"{GAMMA_API}/events",
-                params={
-                    "tag_slug": "weather",
-                    "active": "true",
-                    "closed": "false",
-                    "limit": 100,
-                    "offset": offset,
-                },
-                timeout=REQUEST_TIMEOUT_SEC,
-            )
-            r.raise_for_status()
-        except Exception as e:
-            print(f"[snapshot] gamma fetch failed at offset {offset}: {e}")
-            break
+        r = _session.get(
+            f"{GAMMA_API}/events",
+            params={
+                "tag_slug": "weather",
+                "active": "true",
+                "closed": "false",
+                "limit": _PAGE_SIZE,
+                "offset": offset,
+            },
+            timeout=REQUEST_TIMEOUT_SEC,
+        )
+        r.raise_for_status()
         batch = r.json()
         if not batch:
             break
         out.extend(batch)
-        if len(batch) < 100:
+        if len(batch) < _PAGE_SIZE:
             break
-        offset += 100
-        if offset > 2000:
+        offset += _PAGE_SIZE
+        if offset > _MAX_OFFSET:
+            print(f"[snapshot] WARN: pagination cap hit at offset {offset}, possibly truncated")
             break
     return out
 
@@ -118,11 +122,11 @@ def process_event_dict(event: dict, snapshot_at_utc: str) -> Iterator[dict]:
             "best_ask":                ba,
             "mid_price":               mid,
             "last_trade_price":        ltp,
-            "orderbook_bids_json":     json.dumps(ob_bids[:3]) if ob_bids else None,
-            "orderbook_asks_json":     json.dumps(ob_asks[:3]) if ob_asks else None,
+            "orderbook_bids_json":     json.dumps(ob_bids[:_ORDERBOOK_DEPTH]) if ob_bids else None,
+            "orderbook_asks_json":     json.dumps(ob_asks[:_ORDERBOOK_DEPTH]) if ob_asks else None,
             "volume_24h":              _to_float(m.get("volume24hr")),
             "liquidity_num":           _to_float(m.get("liquidityNum")),
-            "raw_market_json":         json.dumps(m, default=str)[:8000],  # capped
+            "raw_market_json":         json.dumps(m, default=str),
         }
 
 
@@ -152,11 +156,19 @@ def run_one_poll() -> int:
 def main() -> None:
     print("[snapshot] starting daemon loop")
     db.init_db()
+    consecutive_failures = 0
     while True:
         try:
             run_one_poll()
+            consecutive_failures = 0
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except Exception as e:
-            print(f"[snapshot] poll failed: {e}")
+            consecutive_failures += 1
+            print(f"[snapshot] poll failed ({consecutive_failures}/{MAX_CONSECUTIVE_FAILURES}): {e}")
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                print(f"[snapshot] FATAL: {consecutive_failures} consecutive failures, re-raising for systemd")
+                raise
         time.sleep(POLL_INTERVAL_SEC)
 
 

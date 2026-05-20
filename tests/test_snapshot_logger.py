@@ -1,6 +1,11 @@
+from unittest.mock import MagicMock, patch
+
 import pytest
+import requests
+
 import config
 import db
+from snapshot_logger import fetch_active_weather_events, process_event_dict, run_one_poll
 
 
 @pytest.fixture(autouse=True)
@@ -34,11 +39,6 @@ def test_bucket_snapshots_has_expected_columns():
     }
     missing = expected - cols
     assert not missing, f"missing columns: {missing}"
-
-
-import json
-from unittest.mock import patch
-from snapshot_logger import process_event_dict, run_one_poll
 
 
 SAMPLE_EVENT = {
@@ -106,10 +106,18 @@ def test_run_one_poll_writes_to_db():
     assert n == 2
 
     conn = db.get_conn()
-    # db.get_conn() already sets row_factory = sqlite3.Row; re-assignment is harmless.
-    conn.row_factory = __import__("sqlite3").Row
     rows = conn.execute("SELECT * FROM bucket_snapshots ORDER BY id").fetchall()
     assert len(rows) == 2
     assert rows[0]["event_slug"] == SAMPLE_EVENT["slug"]
     assert rows[0]["city"] == "nyc"
     assert rows[0]["bound_lo_f"] == 64.0
+
+
+def test_fetch_active_weather_events_raises_on_http_error():
+    """Fetch errors must propagate so daemon's failure counter triggers."""
+    mock_response = MagicMock()
+    mock_response.raise_for_status.side_effect = requests.HTTPError("503 Server Error")
+
+    with patch("snapshot_logger._session.get", return_value=mock_response):
+        with pytest.raises(requests.HTTPError):
+            fetch_active_weather_events()
