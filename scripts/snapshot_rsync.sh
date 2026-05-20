@@ -24,7 +24,10 @@ rsync -av --ignore-existing --include='*.parquet' --exclude='*' \
     "$SNAPSHOT_LOCAL_ARCHIVE/"
 
 echo "[rsync] verifying sha256 of newly arrived files"
-# For each parquet file present locally, compute sha256 and compare to remote
+# For each parquet file present locally, compute sha256 and compare to remote.
+# A mismatch on one file does NOT abort: we continue so other good files still
+# get their .verified sentinels, and exit non-zero at the end so cron mails.
+failed=0
 for local_file in "$SNAPSHOT_LOCAL_ARCHIVE"/*.parquet; do
     [ -e "$local_file" ] || continue
     fname=$(basename "$local_file")
@@ -40,8 +43,13 @@ for local_file in "$SNAPSHOT_LOCAL_ARCHIVE"/*.parquet; do
         touch "$SNAPSHOT_LOCAL_ARCHIVE/.verified.$fname"
     else
         echo "[rsync] $fname: MISMATCH local=$local_sha remote=$remote_sha — NOT marking verified"
-        exit 1
+        failed=1
     fi
 done
+
+if [ "$failed" -ne 0 ]; then
+    echo "[rsync] one or more files failed sha256 verification — exiting non-zero"
+    exit 1
+fi
 
 echo "[rsync] complete"
