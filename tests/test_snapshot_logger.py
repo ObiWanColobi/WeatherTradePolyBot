@@ -1,4 +1,3 @@
-import sqlite3
 import pytest
 import config
 import db
