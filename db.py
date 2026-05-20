@@ -66,6 +66,39 @@ def init_db():
                 amount      REAL    NOT NULL,
                 recorded_at TEXT    NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS bucket_snapshots (
+                id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_at_utc          TEXT    NOT NULL,
+                event_slug               TEXT    NOT NULL,
+                event_end_iso            TEXT,
+                condition_id             TEXT,
+                city                     TEXT    NOT NULL,
+                kind                     TEXT    NOT NULL,       -- highest|lowest
+                resolution_date          TEXT    NOT NULL,       -- YYYY-MM-DD local
+                sub_market_id            TEXT    NOT NULL,       -- Polymarket market.id
+                sub_market_condition_id  TEXT    NOT NULL,
+                group_item_title         TEXT    NOT NULL,       -- e.g. "64-65°F"
+                bucket_type              TEXT    NOT NULL,       -- threshold|range|exact|tail
+                bound_lo_f               REAL,                   -- NULL for open-bottom tail
+                bound_hi_f               REAL,                   -- NULL for open-top tail
+                is_open_tail             INTEGER NOT NULL DEFAULT 0,
+                best_bid                 REAL,
+                best_ask                 REAL,
+                mid_price                REAL,
+                last_trade_price         REAL,
+                orderbook_bids_json      TEXT,                   -- JSON array of top-3 [price,size]
+                orderbook_asks_json      TEXT,                   -- JSON array of top-3 [price,size]
+                volume_24h               REAL,
+                liquidity_num            REAL,
+                raw_market_json          TEXT                    -- full market dict for forensics
+            );
+            CREATE INDEX IF NOT EXISTS idx_bucket_snap_city_date
+                ON bucket_snapshots (city, resolution_date);
+            CREATE INDEX IF NOT EXISTS idx_bucket_snap_event_slug
+                ON bucket_snapshots (event_slug);
+            CREATE INDEX IF NOT EXISTS idx_bucket_snap_snapshot_at
+                ON bucket_snapshots (snapshot_at_utc);
         """)
 
         # Seed balance if first run
