@@ -1,0 +1,17 @@
+[Unit]
+Description=Polymarket bucket-market snapshot logger (5-min poll)
+After=network-online.target
+
+[Service]
+Type=simple
+User=bot
+WorkingDirectory=/home/bot/TestCode1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /home/bot/TestCode1/snapshot_logger.py
+Restart=always
+RestartSec=30
+StandardOutput=append:/home/bot/TestCode1/logs/snapshot_logger.log
+StandardError=append:/home/bot/TestCode1/logs/snapshot_logger.log
+
+[Install]
+WantedBy=multi-user.target

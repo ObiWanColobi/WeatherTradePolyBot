@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily bucket-snapshot SQLite -> parquet rollup
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=bot
+WorkingDirectory=/home/bot/TestCode1
+ExecStart=/usr/bin/python3 /home/bot/TestCode1/scripts/snapshot_rollup.py
