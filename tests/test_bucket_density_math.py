@@ -84,3 +84,34 @@ def test_deterministic_density_with_sigma_spreads():
     n_nonzero = sum(1 for x in d if x > 0.01)
     assert n_nonzero >= 3
     assert sum(d) == pytest.approx(1.0)
+
+
+from rps_metric import rps_one_event, brier_per_bucket
+
+
+def test_rps_perfect_forecast():
+    p = [0.0] * 11
+    p[5] = 1.0
+    assert rps_one_event(p, truth_idx=5) == pytest.approx(0.0)
+
+
+def test_rps_uniform_forecast():
+    p = [1/11] * 11
+    rps = rps_one_event(p, truth_idx=5)
+    assert 0.5 < rps < 1.0
+
+
+def test_rps_off_by_one():
+    p = [0.0] * 11
+    p[5] = 1.0
+    rps_in = rps_one_event(p, truth_idx=5)
+    rps_off = rps_one_event(p, truth_idx=6)
+    assert rps_off > rps_in
+
+
+def test_brier_sums():
+    p = [0.0] * 11
+    p[5] = 1.0
+    bs = brier_per_bucket(p, truth_idx=5)
+    assert len(bs) == 11
+    assert sum(bs) == pytest.approx(0.0)
