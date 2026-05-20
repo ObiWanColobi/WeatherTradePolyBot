@@ -59,8 +59,8 @@ def parse_bucket_bounds(group_item_title: str) -> tuple[float | None, float | No
         return (None, None)
 
     g = group_item_title.strip()
-    is_celsius = "°C" in g or "C" in g.upper().split() or "celsius" in g.lower()
-    is_fahrenheit = "°F" in g or "F" in g.upper().split() or "fahrenheit" in g.lower()
+    is_celsius = "°C" in g or "celsius" in g.lower()
+    is_fahrenheit = "°F" in g or "fahrenheit" in g.lower()
     # Default to fahrenheit if no unit indicator (US convention)
     use_c = is_celsius and not is_fahrenheit
 
@@ -108,7 +108,7 @@ def parse_bucket_bounds(group_item_title: str) -> tuple[float | None, float | No
 
 
 def classify_bucket_type(group_item_title: str) -> str:
-    """Returns one of: 'tail', 'range', 'exact', or 'threshold'."""
+    """Returns one of: 'tail', 'range', 'exact', or 'unknown'."""
     if not group_item_title:
         return "unknown"
     g = group_item_title.lower()
