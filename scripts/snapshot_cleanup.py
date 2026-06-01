@@ -38,7 +38,15 @@ def cleanup_sqlite(dry_run: bool) -> int:
         return n_before
     with conn:
         conn.execute("DELETE FROM bucket_snapshots WHERE snapshot_at_utc < ?", [cutoff])
-    print(f"[cleanup] deleted {n_before} SQLite rows older than {cutoff}")
+    # DELETE alone leaves freed pages in the file (the file never shrinks), so the
+    # DB grows unbounded toward the disk ceiling even with daily pruning. VACUUM
+    # returns those pages to the OS. With 7-day retention the live DB stays ~1 GB,
+    # so VACUUM's scratch requirement (~final DB size) is small and safe — unlike
+    # vacuuming a runaway 15 GB file, which needs 15 GB of free disk it doesn't have.
+    if n_before:
+        conn.execute("VACUUM")
+    conn.close()
+    print(f"[cleanup] deleted {n_before} SQLite rows older than {cutoff} (VACUUM run)")
     return n_before
 
 

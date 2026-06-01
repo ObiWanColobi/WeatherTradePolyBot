@@ -1,0 +1,9 @@
+[Unit]
+Description=Run snapshot_cleanup daily at 02:00 UTC (after 00:00 rollup)
+
+[Timer]
+OnCalendar=*-*-* 02:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

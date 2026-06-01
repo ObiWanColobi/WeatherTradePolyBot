@@ -1,0 +1,8 @@
+[Unit]
+Description=Daily bucket-snapshot SQLite prune + VACUUM (7-day retention)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/weatherbot
+ExecStart=/opt/weatherbot/.venv/bin/python /opt/weatherbot/scripts/snapshot_cleanup.py
