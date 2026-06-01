@@ -1,14 +1,23 @@
-"""Two-stage cleanup, gated on backup verification:
+"""Two-stage cleanup to bound disk usage on the VPS:
 
-1. SQLite rows >7 days old: delete (we keep last 7d for live queries)
-2. VPS parquet files >30 days old: delete (we keep last 30d as insurance)
+1. SQLite rows >7 days old: delete + VACUUM (we keep last 7d for live queries).
+2. VPS parquet files >21 days old: delete (the VPS is a rolling buffer; the
+   local archive is the permanent system of record).
 
-A VPS parquet file is eligible for deletion ONLY if the local archive
-contains the corresponding .verified.<fname> marker — guaranteeing the
-local backup is byte-identical to what we have on VPS.
+History: the parquet stage was originally gated on a `.verified.<fname>` marker
+living at an SSHFS mount of the local archive (LOCAL_ARCHIVE_MIRROR_PATH). That
+mount was never set up on the VPS, so the gate skipped *every* file and parquets
+accumulated at ~150 MB/day with no ceiling — the slow-fuse half of the 2026-06-01
+disk-fill incident. Replaced with a simple N-day rolling window plus a safety
+floor: never delete if it would leave fewer than PARQUET_MIN_KEEP_FILES recent
+files (guards against a date-parse/clock bug nuking the whole buffer).
 
-Run on the VPS via daily cron AFTER snapshot_rollup.py + after local rsync
-should have completed (e.g. 02:00 UTC if rollup is 00:00 and rsync 00:15).
+The local pull is currently manual (WinSCP). A scheduled local pull (workstream
+"B3") is the real backstop for the 21-day window — until that lands, pull at
+least every ~3 weeks or widen PARQUET_RETENTION_DAYS.
+
+Run on the VPS via the snapshot_cleanup.timer (daily 02:00 UTC, after the 00:00
+rollup).
 """
 import argparse
 import sqlite3
@@ -19,12 +28,11 @@ from pathlib import Path
 DB_PATH = Path(__file__).parent.parent / "weather_bot.db"
 PARQUET_DIR = Path(__file__).parent.parent / "snapshot_parquet"
 
-# These paths must match the local archive layout via SSHFS or shared mount.
-# If local archive isn't accessible from VPS, this must be invoked from LOCAL after rsync.
-LOCAL_ARCHIVE_MIRROR_PATH = Path("/mnt/local_archive_mirror/snapshot_parquet_local")
-
 SQLITE_RETENTION_DAYS = 7
-PARQUET_RETENTION_DAYS = 30
+PARQUET_RETENTION_DAYS = 21
+# Safety floor: refuse to prune parquets if doing so would leave fewer than this
+# many files. A date-parse or system-clock bug must not be able to wipe the buffer.
+PARQUET_MIN_KEEP_FILES = 7
 
 
 def cleanup_sqlite(dry_run: bool) -> int:
@@ -51,29 +59,43 @@ def cleanup_sqlite(dry_run: bool) -> int:
 
 
 def cleanup_vps_parquet(dry_run: bool) -> int:
+    """Delete VPS parquets older than PARQUET_RETENTION_DAYS, keeping the VPS as a
+    rolling buffer. Honours a safety floor so a bug can't wipe the whole buffer."""
     cutoff_date = (datetime.now(timezone.utc).date() - timedelta(days=PARQUET_RETENTION_DAYS))
-    deleted = 0
-    skipped_unverified = 0
+
+    dated_files = []
     for p in sorted(PARQUET_DIR.glob("bucket_snapshots_*.parquet")):
         try:
             fdate = datetime.strptime(p.stem.replace("bucket_snapshots_", ""), "%Y-%m-%d").date()
         except ValueError:
             continue
-        if fdate >= cutoff_date:
-            continue
-        marker = LOCAL_ARCHIVE_MIRROR_PATH / f".verified.{p.name}"
-        if not marker.exists():
-            print(f"[cleanup] SKIP {p.name}: no verified marker (local backup not confirmed)")
-            skipped_unverified += 1
-            continue
+        dated_files.append((fdate, p))
+
+    eligible = [(d, p) for (d, p) in dated_files if d < cutoff_date]
+    if not eligible:
+        return 0
+
+    # Safety floor: never let pruning drop the buffer below the minimum file count.
+    survivors_after = len(dated_files) - len(eligible)
+    if survivors_after < PARQUET_MIN_KEEP_FILES:
+        # Keep the newest eligible files until we'd retain the floor.
+        eligible.sort()  # oldest first
+        max_deletable = max(0, len(dated_files) - PARQUET_MIN_KEEP_FILES)
+        if max_deletable < len(eligible):
+            print(
+                f"[cleanup] safety floor: capping parquet deletion at {max_deletable} "
+                f"to retain {PARQUET_MIN_KEEP_FILES} files"
+            )
+        eligible = eligible[:max_deletable]
+
+    deleted = 0
+    for fdate, p in eligible:
         if dry_run:
-            print(f"[cleanup] DRY-RUN would delete VPS parquet {p.name}")
+            print(f"[cleanup] DRY-RUN would delete VPS parquet {p.name} (older than {cutoff_date})")
         else:
             p.unlink()
-            print(f"[cleanup] deleted VPS parquet {p.name}")
+            print(f"[cleanup] deleted VPS parquet {p.name} (older than {cutoff_date})")
         deleted += 1
-    if skipped_unverified:
-        print(f"[cleanup] WARNING: {skipped_unverified} files older than {cutoff_date} skipped — investigate rsync")
     return deleted
 
 

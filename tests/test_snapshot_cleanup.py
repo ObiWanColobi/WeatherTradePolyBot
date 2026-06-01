@@ -1,10 +1,12 @@
 """Tests for snapshot_cleanup.py.
 
-Focus: the sentinel-gated deletion is load-bearing. Verify that:
-1. Files OLDER than retention WITH sentinel → deleted
-2. Files OLDER than retention WITHOUT sentinel → skipped (NOT deleted)
-3. Files YOUNGER than retention → never touched (regardless of sentinel)
-4. Dry-run does not actually delete anything
+Parquet retention is a simple N-day rolling window with a safety floor. Verify:
+1. Files OLDER than retention → deleted
+2. Files YOUNGER than retention → kept
+3. Dry-run reports but does not delete
+4. Safety floor caps deletion so the buffer can't be wiped (oldest deleted first)
+5. No eligible files → no-op
+Plus the SQLite prune (+VACUUM) deletes only rows older than retention.
 """
 import sqlite3
 import sys
@@ -21,8 +23,6 @@ def cleanup_module(tmp_path, monkeypatch):
     db_path = tmp_path / "test.db"
     parquet_dir = tmp_path / "snapshot_parquet"
     parquet_dir.mkdir()
-    mirror_dir = tmp_path / "local_archive_mirror"
-    mirror_dir.mkdir()
 
     # Seed a SQLite table with a mix of old and new rows
     conn = sqlite3.connect(str(db_path))
@@ -58,12 +58,14 @@ def cleanup_module(tmp_path, monkeypatch):
     import snapshot_cleanup
     monkeypatch.setattr(snapshot_cleanup, "DB_PATH", db_path)
     monkeypatch.setattr(snapshot_cleanup, "PARQUET_DIR", parquet_dir)
-    monkeypatch.setattr(snapshot_cleanup, "LOCAL_ARCHIVE_MIRROR_PATH", mirror_dir)
-    return snapshot_cleanup, parquet_dir, mirror_dir, db_path
+    # Low floor so the rolling-window tests don't trip the safety cap; one test
+    # raises it explicitly to exercise the floor.
+    monkeypatch.setattr(snapshot_cleanup, "PARQUET_MIN_KEEP_FILES", 1)
+    return snapshot_cleanup, parquet_dir, db_path
 
 
 def test_sqlite_cleanup_deletes_old_rows(cleanup_module):
-    mod, _, _, db_path = cleanup_module
+    mod, _, db_path = cleanup_module
     n = mod.cleanup_sqlite(dry_run=False)
     assert n == 2  # two old rows
     conn = sqlite3.connect(str(db_path))
@@ -73,7 +75,7 @@ def test_sqlite_cleanup_deletes_old_rows(cleanup_module):
 
 
 def test_sqlite_dry_run_does_not_delete(cleanup_module):
-    mod, _, _, db_path = cleanup_module
+    mod, _, db_path = cleanup_module
     n = mod.cleanup_sqlite(dry_run=True)
     assert n == 2
     conn = sqlite3.connect(str(db_path))
@@ -82,36 +84,56 @@ def test_sqlite_dry_run_does_not_delete(cleanup_module):
     assert remaining == 3  # nothing deleted
 
 
-def test_parquet_cleanup_deletes_only_verified_old(cleanup_module):
-    mod, parquet_dir, mirror_dir, _ = cleanup_module
-    # Create three parquet files: old+verified, old+unverified, young+verified
-    old_date_verified = (datetime.now(timezone.utc).date() - timedelta(days=40)).isoformat()
-    old_date_unverified = (datetime.now(timezone.utc).date() - timedelta(days=35)).isoformat()
-    young_date = (datetime.now(timezone.utc).date() - timedelta(days=10)).isoformat()
+def _mkparquet(parquet_dir, days_ago):
+    d = (datetime.now(timezone.utc).date() - timedelta(days=days_ago)).isoformat()
+    f = parquet_dir / f"bucket_snapshots_{d}.parquet"
+    f.touch()
+    return f
 
-    f_old_ver = parquet_dir / f"bucket_snapshots_{old_date_verified}.parquet"
-    f_old_unver = parquet_dir / f"bucket_snapshots_{old_date_unverified}.parquet"
-    f_young = parquet_dir / f"bucket_snapshots_{young_date}.parquet"
-    for f in (f_old_ver, f_old_unver, f_young):
-        f.touch()
 
-    # Drop sentinel markers for the verified ones
-    (mirror_dir / f".verified.{f_old_ver.name}").touch()
-    (mirror_dir / f".verified.{f_young.name}").touch()
+def test_parquet_cleanup_deletes_older_than_retention(cleanup_module):
+    mod, parquet_dir, _ = cleanup_module
+    # RETENTION is 21 days. Two beyond it, one inside it.
+    f_old1 = _mkparquet(parquet_dir, 40)
+    f_old2 = _mkparquet(parquet_dir, 25)
+    f_young = _mkparquet(parquet_dir, 10)
 
     n = mod.cleanup_vps_parquet(dry_run=False)
 
-    assert n == 1  # only the old+verified one was eligible
-    assert not f_old_ver.exists()       # deleted
-    assert f_old_unver.exists()         # skipped (no sentinel)
-    assert f_young.exists()             # too young to touch
+    assert n == 2
+    assert not f_old1.exists()   # > 21d → deleted
+    assert not f_old2.exists()   # > 21d → deleted
+    assert f_young.exists()      # < 21d → kept
 
 
 def test_parquet_dry_run_does_not_delete(cleanup_module):
-    mod, parquet_dir, mirror_dir, _ = cleanup_module
-    old_date = (datetime.now(timezone.utc).date() - timedelta(days=40)).isoformat()
-    f = parquet_dir / f"bucket_snapshots_{old_date}.parquet"
-    f.touch()
-    (mirror_dir / f".verified.{f.name}").touch()
-    mod.cleanup_vps_parquet(dry_run=True)
-    assert f.exists()  # not actually deleted
+    mod, parquet_dir, _ = cleanup_module
+    # Two old + one young so the floor (1) never interferes with the old ones.
+    f_old1 = _mkparquet(parquet_dir, 40)
+    f_old2 = _mkparquet(parquet_dir, 30)
+    f_young = _mkparquet(parquet_dir, 10)
+    n = mod.cleanup_vps_parquet(dry_run=True)
+    assert n == 2            # reports it would delete the two old ones
+    assert f_old1.exists() and f_old2.exists() and f_young.exists()  # but didn't
+
+
+def test_parquet_safety_floor_caps_deletion(cleanup_module, monkeypatch):
+    # Even when every file is past retention, never drop below the floor.
+    mod, parquet_dir, _ = cleanup_module
+    monkeypatch.setattr(mod, "PARQUET_MIN_KEEP_FILES", 2)
+    files = sorted(_mkparquet(parquet_dir, d) for d in (40, 35, 30, 25))  # all > 21d
+
+    n = mod.cleanup_vps_parquet(dry_run=False)
+
+    assert n == 2  # 4 files - floor of 2 = at most 2 deletable
+    remaining = sorted(parquet_dir.glob("bucket_snapshots_*.parquet"))
+    assert len(remaining) == 2
+    # The two NEWEST survive (oldest deleted first).
+    assert files[-1] in remaining and files[-2] in remaining
+
+
+def test_parquet_no_eligible_files_is_noop(cleanup_module):
+    mod, parquet_dir, _ = cleanup_module
+    _mkparquet(parquet_dir, 5)
+    _mkparquet(parquet_dir, 10)
+    assert mod.cleanup_vps_parquet(dry_run=False) == 0
