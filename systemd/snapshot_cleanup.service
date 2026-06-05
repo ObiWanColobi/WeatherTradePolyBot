@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily bucket-snapshot SQLite prune + VACUUM (7-day retention)
+Description=Daily bucket-snapshot SQLite prune + VACUUM (3-day retention)
 After=network-online.target
 
 [Service]

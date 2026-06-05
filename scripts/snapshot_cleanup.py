@@ -1,6 +1,9 @@
 """Two-stage cleanup to bound disk usage on the VPS:
 
-1. SQLite rows >7 days old: delete + VACUUM (we keep last 7d for live queries).
+1. SQLite rows older than 3 UTC days: delete (per-day, committing between days)
+   + VACUUM. We keep the last 3 days for the nightly rollup / live queries. (Was
+   7 days until 2026-06-05; the VPS logs ~2 GB/day, so 7-day retention let the DB
+   reach ~14 GB before the first prune — past the 20 GB disk wall.)
 2. VPS parquet files >21 days old: delete (the VPS is a rolling buffer; the
    local archive is the permanent system of record).
 
@@ -28,7 +31,7 @@ from pathlib import Path
 DB_PATH = Path(__file__).parent.parent / "weather_bot.db"
 PARQUET_DIR = Path(__file__).parent.parent / "snapshot_parquet"
 
-SQLITE_RETENTION_DAYS = 7
+SQLITE_RETENTION_DAYS = 3
 PARQUET_RETENTION_DAYS = 21
 # Safety floor: refuse to prune parquets if doing so would leave fewer than this
 # many files. A date-parse or system-clock bug must not be able to wipe the buffer.
@@ -36,25 +39,55 @@ PARQUET_MIN_KEEP_FILES = 7
 
 
 def cleanup_sqlite(dry_run: bool) -> int:
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=SQLITE_RETENTION_DAYS)).isoformat()
+    # Retain whole UTC days: keep today + (SQLITE_RETENTION_DAYS - 1) prior full days,
+    # delete every UTC day strictly older than that. Working in whole days (not a
+    # sub-day timestamp cutoff) matches the rollup's per-UTC-day grain and avoids a
+    # boundary day straddling the cutoff — so the reported count always equals the
+    # rows actually deleted.
+    cutoff_date = (
+        datetime.now(timezone.utc).date() - timedelta(days=SQLITE_RETENTION_DAYS)
+    ).isoformat()
     conn = sqlite3.connect(str(DB_PATH))
     n_before = conn.execute(
-        "SELECT COUNT(*) FROM bucket_snapshots WHERE snapshot_at_utc < ?", [cutoff]
+        "SELECT COUNT(*) FROM bucket_snapshots WHERE substr(snapshot_at_utc,1,10) <= ?",
+        [cutoff_date],
     ).fetchone()[0]
     if dry_run:
-        print(f"[cleanup] DRY-RUN would delete {n_before} SQLite rows older than {cutoff}")
+        print(f"[cleanup] DRY-RUN would delete {n_before} SQLite rows on/before {cutoff_date}")
+        conn.close()
         return n_before
-    with conn:
-        conn.execute("DELETE FROM bucket_snapshots WHERE snapshot_at_utc < ?", [cutoff])
+
+    # Delete one day at a time, committing between days. A single bulk
+    # `DELETE ... <= cutoff` over a backlog can touch >1M rows, and its rollback
+    # journal then needs scratch space the disk may not have — on 2026-06-05 exactly
+    # that DELETE failed with SQLite error 13 ("disk full") and rolled back, leaving
+    # the DB un-pruned and the disk filling. Per-day deletes bound each transaction's
+    # journal to ~one day (~540k rows) and let a backlogged prune make forward
+    # progress even under disk pressure.
+    old_days = [
+        r[0] for r in conn.execute(
+            "SELECT DISTINCT substr(snapshot_at_utc,1,10) AS d FROM bucket_snapshots "
+            "WHERE substr(snapshot_at_utc,1,10) <= ? ORDER BY d",
+            [cutoff_date],
+        ).fetchall()
+    ]
+    for day in old_days:
+        with conn:
+            conn.execute(
+                "DELETE FROM bucket_snapshots WHERE substr(snapshot_at_utc,1,10) = ?", [day]
+            )
+
     # DELETE alone leaves freed pages in the file (the file never shrinks), so the
     # DB grows unbounded toward the disk ceiling even with daily pruning. VACUUM
-    # returns those pages to the OS. With 7-day retention the live DB stays ~1 GB,
-    # so VACUUM's scratch requirement (~final DB size) is small and safe — unlike
-    # vacuuming a runaway 15 GB file, which needs 15 GB of free disk it doesn't have.
+    # returns those pages to the OS. With 3-day retention the live DB stays ~6 GB
+    # (the VPS logs ~2 GB/day), so VACUUM's scratch requirement (~final DB size) is
+    # manageable — unlike vacuuming a runaway 15 GB file, which needs 15 GB of free
+    # disk it doesn't have. (Retention was 7 days until 2026-06-05; that let the DB
+    # reach ~14 GB before the first prune, past the 20 GB disk wall.)
     if n_before:
         conn.execute("VACUUM")
     conn.close()
-    print(f"[cleanup] deleted {n_before} SQLite rows older than {cutoff} (VACUUM run)")
+    print(f"[cleanup] deleted {n_before} SQLite rows on/before {cutoff_date} (VACUUM run)")
     return n_before
 
 
