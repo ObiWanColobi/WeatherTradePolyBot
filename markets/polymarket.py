@@ -156,23 +156,20 @@ def fetch_weather_event(city_slug: str, date, kind: str = "highest") -> dict | N
     return body
 
 
-def iter_weather_markets(
+def iter_weather_events(
     cities: list[str],
     *,
     days_ahead: int = 2,
     kinds: tuple[str, ...] = ("highest", "lowest"),
     request_delay_sec: float = 0.03,
 ) -> Iterator[dict]:
-    """Yield raw Polymarket market dicts for the (cities × forward-days × kinds)
-    grid, discovered via direct `/events/slug/{slug}` lookups.
+    """Yield whole event dicts for the (cities × forward-days × kinds) grid via
+    `/events/slug/{slug}` lookups.
 
-    Each yielded dict is a market from `event["markets"]` with two extra keys
-    injected for downstream convenience:
-        _event_slug : str — the parent event slug
-        _event_end  : str — the event endDate (ISO)
-
-    Per-event responses are cached for 15 min (see _EVENT_CACHE_TTL_SEC).
-    Cold-pass cost: ~len(cities) * (days_ahead + 1) * len(kinds) requests.
+    Each yielded event is the raw Gamma event dict (has 'slug', 'endDate',
+    'markets'). Per-event responses are cached for 15 min (see
+    _EVENT_CACHE_TTL_SEC). Cold-pass cost:
+    ~len(cities) * (days_ahead + 1) * len(kinds) requests.
 
     Past-close events are filtered out: Polymarket leaves them
     `acceptingOrders=True` through UMA resolution but the bot can't enter
@@ -190,19 +187,52 @@ def iter_weather_markets(
                     if request_delay_sec > 0:
                         _time.sleep(request_delay_sec)
                     continue
-                event_slug = event.get("slug") or ""
-                event_end  = event.get("endDate") or ""
+                event_end = event.get("endDate") or ""
                 if event_end and event_end < now_iso:
                     if request_delay_sec > 0:
                         _time.sleep(request_delay_sec)
                     continue
-                for m in event.get("markets") or []:
-                    if isinstance(m, dict):
-                        m["_event_slug"] = event_slug
-                        m["_event_end"]  = event_end
-                        yield m
+                yield event
                 if request_delay_sec > 0:
                     _time.sleep(request_delay_sec)
+
+
+def iter_weather_markets(
+    cities: list[str],
+    *,
+    days_ahead: int = 2,
+    kinds: tuple[str, ...] = ("highest", "lowest"),
+    request_delay_sec: float = 0.03,
+) -> Iterator[dict]:
+    """Yield raw Polymarket market dicts for the (cities × forward-days × kinds)
+    grid, discovered via direct `/events/slug/{slug}` lookups.
+
+    Delegates the discovery walk to `iter_weather_events`; behavior is preserved
+    for existing callers. Each yielded dict is a market from `event["markets"]`
+    with two extra keys injected for downstream convenience:
+        _event_slug : str — the parent event slug
+        _event_end  : str — the event endDate (ISO)
+
+    Per-event responses are cached for 15 min (see _EVENT_CACHE_TTL_SEC).
+    Cold-pass cost: ~len(cities) * (days_ahead + 1) * len(kinds) requests.
+
+    Past-close events are filtered out: Polymarket leaves them
+    `acceptingOrders=True` through UMA resolution but the bot can't enter
+    them (entry_min_hours_to_close gate) and many have dead CLOB books.
+    """
+    for event in iter_weather_events(
+        cities,
+        days_ahead=days_ahead,
+        kinds=kinds,
+        request_delay_sec=request_delay_sec,
+    ):
+        event_slug = event.get("slug") or ""
+        event_end  = event.get("endDate") or ""
+        for m in event.get("markets") or []:
+            if isinstance(m, dict):
+                m["_event_slug"] = event_slug
+                m["_event_end"]  = event_end
+                yield m
 
 
 def paginate_active_markets(
