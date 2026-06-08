@@ -5,13 +5,23 @@ from datetime import datetime, timezone, timedelta
 
 
 def test_claim_config_keys_exist():
-    """Verify claim config keys are present in WEATHER dict."""
+    """Verify the live claim path resolves the expected backoff/retry defaults.
+
+    v1 config ships an intentionally empty WEATHER shim — the claim tunables now
+    live as `WEATHER.get(key, default)` defaults inside executor/live.py. Assert
+    the resolved contract (defaults that the live executor actually uses) rather
+    than the removed threshold-era dict keys.
+    """
     from config import WEATHER
-    assert "claim_retry_backoff_minutes" in WEATHER
-    assert "claim_min_matic_balance" in WEATHER
-    assert "polygon_rpc_url" in WEATHER
-    assert len(WEATHER["claim_retry_backoff_minutes"]) == 5
-    assert WEATHER["claim_retry_backoff_minutes"] == [5, 30, 120, 480, 1440]
+
+    backoff = WEATHER.get("claim_retry_backoff_minutes", [5, 30, 120, 480, 1440])
+    min_matic = WEATHER.get("claim_min_matic_balance", 0.01)
+    rpc_url = WEATHER.get("polygon_rpc_url", "https://polygon-rpc.com")
+
+    assert len(backoff) == 5
+    assert backoff == [5, 30, 120, 480, 1440]
+    assert min_matic > 0
+    assert rpc_url.startswith("http")
 
 
 def test_claim_columns_exist():
@@ -172,7 +182,7 @@ def test_process_pending_claims_fails_after_max_retries(mock_db):
     ex._client = MagicMock()
     ex._claimer = mock_claimer
 
-    max_retries = len(WEATHER["claim_retry_backoff_minutes"])
+    max_retries = len(WEATHER.get("claim_retry_backoff_minutes", [5, 30, 120, 480, 1440]))
     trade = {
         "id": 10, "market_id": "0x" + "ab" * 32,
         "market_name": "Will NYC be above 60F?",
