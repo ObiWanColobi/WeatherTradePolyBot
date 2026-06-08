@@ -37,7 +37,7 @@ def test_plan_fire_matches_direct_build_bucket_bets():
     cfg = ShotgunConfig(edge_threshold=0.05, mass_core_frac=0.9,
                         budget_per_city_day=50.0, per_bucket_liq_cap_frac=0.0)
     coords = {"lat": 43.7, "lon": -79.4, "tz": "America/Toronto"}
-    live_bets, live_center, live_density = plan_fire(
+    live_bets, live_center, live_density, _ = plan_fire(
         "toronto", "2026-06-10", _buckets(), cfg, coords, _ensemble)
 
     # Direct path: build the same rows manually + call build_bucket_bets.
@@ -66,9 +66,9 @@ def test_plan_fire_matches_direct_build_bucket_bets():
 
 
 def test_plan_fire_provenance_returned_on_empty():
-    # no ensemble -> ([], None, None)
+    # no ensemble -> ([], None, None, [])
     cfg = ShotgunConfig()
-    bets, center, density = plan_fire("toronto", "2099-01-01", _buckets(), cfg,
+    bets, center, density, rejected = plan_fire("toronto", "2099-01-01", _buckets(), cfg,
                                      {"lat":43.7,"lon":-79.4,"tz":"America/Toronto"},
                                      lambda *a: [])
-    assert bets == [] and center is None and density is None
+    assert bets == [] and center is None and density is None and rejected == []

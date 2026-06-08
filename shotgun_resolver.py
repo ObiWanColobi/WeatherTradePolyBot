@@ -69,10 +69,36 @@ def settle_leg_polymarket(bet: dict, resolution_fetch) -> bool:
     return True
 
 
+def settle_shadow_leg_polymarket(shadow: dict, resolution_fetch) -> bool:
+    """Settle ONE open shadow (counterfactual) leg via Polymarket resolution.
+    Records what would_side WOULD have earned on a $1 notional stake — credits
+    NO balance (it was never placed). Returns True if it resolved."""
+    if shadow["status"] != "open":
+        return False
+    res = resolution_fetch(shadow["sub_market_condition_id"])
+    if not res or not res.get("resolved"):
+        return False
+    bucket_hit = res.get("yes_price") == 1.0
+    won = bucket_hit if shadow["would_side"] == "yes" else (not bucket_hit)
+    # $1 notional: win pays (1/mid)*1 - 1 = (1-mid)/mid on YES; symmetric for NO
+    # via the NO cost (1-mid). Simpler/robust: P&L = payout - cost on $1 stake.
+    cost = float(shadow["mid_price"]) if shadow["would_side"] == "yes" else (1.0 - float(shadow["mid_price"]))
+    if cost <= 0.0:
+        hypo_pnl = 0.0   # degenerate price — no meaningful counterfactual
+    else:
+        shares = 1.0 / cost           # $1 buys this many shares of the would-side token
+        hypo_pnl = (shares * 1.0 - 1.0) if won else (-1.0)
+    db.update_shadow_bet(shadow["id"], dict(
+        status="closed", resolved_outcome=("win" if won else "loss"), hypo_pnl=hypo_pnl))
+    return True
+
+
 def settle_due_fires_polymarket(resolution_fetch=None) -> int:
     """For every open fire, try to settle each open leg via Polymarket resolution.
-    A fire is closed only once all its legs are closed. Returns # legs settled.
-    resolution_fetch defaults to markets.polymarket.get_resolution_status."""
+    A fire is closed only once all its REAL legs are closed. Also settles open
+    shadow (counterfactual) legs through the same resolution — they record
+    hypo_pnl but credit no balance, and do NOT gate fire closure.
+    Returns # real legs settled. resolution_fetch defaults to get_resolution_status."""
     if resolution_fetch is None:
         from markets.polymarket import get_resolution_status as resolution_fetch
     settled = 0
@@ -83,7 +109,14 @@ def settle_due_fires_polymarket(resolution_fetch=None) -> int:
                 continue
             if settle_leg_polymarket(leg, resolution_fetch):
                 settled += 1
-        # re-read legs; close the fire only if none remain open
+        # Settle shadow legs too (no balance effect, no closure gating).
+        for shadow in db.get_shadow_bets_for_fire(fire["id"]):
+            if shadow["status"] == "open":
+                try:
+                    settle_shadow_leg_polymarket(shadow, resolution_fetch)
+                except Exception as e:
+                    print(f"[resolve] shadow settle failed id={shadow.get('id')}: {e}")
+        # re-read legs; close the fire only if no REAL leg remains open
         still_open = [b for b in db.get_all_bets_for_fire(fire["id"]) if b["status"] == "open"]
         if not still_open:
             db.update_fire(fire["id"], dict(status="closed"))

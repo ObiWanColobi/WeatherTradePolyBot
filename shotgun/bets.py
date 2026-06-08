@@ -107,6 +107,88 @@ def mass_core_indices(density: list[float], frac: float) -> set[int]:
     return chosen
 
 
+def classify_rejections(
+    rows: list[dict],
+    density_vector: list[float],
+    mode: str,
+    mass_core_frac: float,
+    edge_threshold: float,
+    price_min: float,
+    price_max: float,
+) -> list[dict]:
+    """For each row that build_bucket_bets would NOT select, return a dict with
+    the would-be side, its edge, in_core flag, and the gating skip_reason.
+
+    Pure mirror of build_bucket_bets' selection branch — kept in lockstep so the
+    counterfactual log records exactly why each bucket was filtered. Rows that
+    WOULD be selected are omitted (they become real bets, not shadows).
+
+    skip_reason values:
+      not-core      — YES had edge+price but the bucket isn't in the mass-core
+      edge<thresh   — neither side cleared edge_threshold
+      yes-price-band— YES had core+edge but mid outside [price_min, price_max]
+      no-cost-band  — NO had edge but (1-mid) outside [price_min, price_max]
+    """
+    core = mass_core_indices(density_vector, mass_core_frac) if mode in (
+        "dist_yes", "dist_yes_no") else None
+    out: list[dict] = []
+    for r in rows:
+        idx = r["ladder_idx"]
+        d = r["density"]
+        mid = r["mid_price"]
+        in_core = bool(core is not None and idx in core)
+
+        yes_edge = d - mid
+        yes_price_ok = price_min <= mid <= price_max
+        no_cost = 1.0 - mid
+        no_edge = mid - d
+        no_cost_ok = price_min <= no_cost <= price_max
+
+        if mode == "edge_shotgun":
+            if yes_edge >= edge_threshold and yes_price_ok:
+                continue  # would be selected
+            reason = "edge<thresh" if yes_edge < edge_threshold else "yes-price-band"
+            out.append(_shadow_row(r, "yes", yes_edge, in_core, reason))
+            continue
+
+        # dist_yes / dist_yes_no
+        yes_ok = in_core and yes_edge >= edge_threshold and yes_price_ok
+        if yes_ok:
+            continue  # would be selected as YES
+        no_ok = (mode == "dist_yes_no" and no_edge >= edge_threshold and no_cost_ok)
+        if no_ok:
+            continue  # would be selected as NO
+
+        # Rejected — pick the most informative (side, reason).
+        if no_edge >= edge_threshold and not no_cost_ok:
+            out.append(_shadow_row(r, "no", no_edge, in_core, "no-cost-band"))
+        elif yes_edge >= edge_threshold and not in_core:
+            out.append(_shadow_row(r, "yes", yes_edge, in_core, "not-core"))
+        elif yes_edge >= edge_threshold and not yes_price_ok:
+            out.append(_shadow_row(r, "yes", yes_edge, in_core, "yes-price-band"))
+        else:
+            # Whichever side is closer to clearing edge is the "would" side.
+            if no_edge > yes_edge:
+                out.append(_shadow_row(r, "no", no_edge, in_core, "edge<thresh"))
+            else:
+                out.append(_shadow_row(r, "yes", yes_edge, in_core, "edge<thresh"))
+    return out
+
+
+def _shadow_row(r: dict, side: str, edge: float, in_core: bool, reason: str) -> dict:
+    """Project a candidate row into the shadow-bet record shape."""
+    return dict(
+        market_id=r.get("market_id"),
+        sub_market_condition_id=r.get("sub_market_condition_id"),
+        group_item_title=r.get("group_item_title"),
+        would_side=side, skip_reason=reason,
+        ladder_idx=r.get("ladder_idx"), density=r.get("density"),
+        mid_price=r.get("mid_price"), edge=float(edge), in_core=int(in_core),
+        winset_kind=r.get("winset_kind"),
+        winset_payload_json=r.get("winset_payload_json"),
+    )
+
+
 def build_bucket_bets(
     rows: list[dict],
     density_vector: list[float],

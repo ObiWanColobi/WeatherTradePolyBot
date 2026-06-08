@@ -50,8 +50,9 @@ class BaseExecutor(ABC):
         """
 
     def place_fire(self, city, resolution_date, lead_hours, center_f, density_json,
-                   budget_usd, bets):
+                   budget_usd, bets, shadow_candidates=None):
         """Record a shotgun fire (parent) + leg bets. Returns fire_id (0 if none placed).
+        shadow_candidates: filtered-out buckets logged as counterfactuals (no money).
         Paper mode implements this; live mode added later."""
         raise NotImplementedError
 

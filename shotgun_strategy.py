@@ -9,7 +9,7 @@ from typing import Callable
 
 from shotgun.forecast import members_f_for_date, build_density
 from shotgun.bucket_boundaries import build_ladder, daily_max_to_bucket_idx
-from shotgun.bets import compute_winset, winset_density, build_bucket_bets
+from shotgun.bets import compute_winset, winset_density, build_bucket_bets, classify_rejections
 from shotgun.sizing import apply_liquidity_cap
 
 
@@ -33,12 +33,18 @@ def plan_fire(
     cfg: ShotgunConfig,
     coords: dict,
     ensemble_fetch: Callable,
-) -> tuple[list[dict], float | None, list | None]:
-    """Return (bets, center_f, density) for this city-day.
+) -> tuple[list[dict], float | None, list | None, list[dict]]:
+    """Return (bets, center_f, density, rejected) for this city-day.
 
-    Returns ([], None, None) when there is no usable ensemble; ([], center_f,
-    density) when the ensemble is fine but no bets pass the filters. Returning
-    the center_f/density computed here lets the caller persist the EXACT
+    `rejected` is the counterfactual log: candidate buckets that passed the
+    cheap pre-filters (volume/winset/mid) but were rejected by a strategy gate
+    (mass-core / price-band / edge). Each is tagged with would_side + skip_reason
+    so a later analysis can ask "would loosening a lever have made money?". It is
+    [] when there are no reviewable candidates.
+
+    Returns ([], None, None, []) when there is no usable ensemble; ([], center_f,
+    density, rejected) when the ensemble is fine but no bets pass the filters.
+    Returning the center_f/density computed here lets the caller persist the EXACT
     provenance the bets were sized against (no second fetch, no update race).
 
     buckets: live sub-market dicts. Each needs: sub_market_condition_id,
@@ -49,12 +55,12 @@ def plan_fire(
     lat = coords.get("lat")
     lon = coords.get("lon")
     if lat is None or lon is None:
-        return [], None, None
+        return [], None, None, []
     ensemble = ensemble_fetch(lat, lon, coords.get("tz", "auto"))
     members_f = members_f_for_date(ensemble, resolution_date)
     center_f, density = build_density(members_f)
     if center_f is None:
-        return [], None, None
+        return [], None, None, []
     ladder = build_ladder(center_f)
     dv = list(density)
 
@@ -99,11 +105,15 @@ def plan_fire(
         ))
 
     if not rows:
-        return [], center_f, density
+        return [], center_f, density, []
 
+    rejected = classify_rejections(
+        rows, dv, cfg.mode, cfg.mass_core_frac, cfg.edge_threshold,
+        cfg.price_min, cfg.price_max,
+    )
     bets = build_bucket_bets(
         rows, dv, cfg.mode, cfg.mass_core_frac, cfg.edge_threshold,
         cfg.price_min, cfg.price_max, cfg.sizing_mode, cfg.budget_per_city_day,
     )
     bets = apply_liquidity_cap(bets, cfg.per_bucket_liq_cap_frac)
-    return bets, center_f, density
+    return bets, center_f, density, rejected

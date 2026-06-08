@@ -246,11 +246,16 @@ class PaperExecutor(BaseExecutor):
 
     def place_fire(self, city: str, resolution_date: str, lead_hours: float,
                    center_f: float, density_json: str, budget_usd: float,
-                   bets: list[dict]) -> int:
+                   bets: list[dict], shadow_candidates: list[dict] | None = None) -> int:
         """Record one shotgun fire (parent) + all its leg bets (children).
         Each leg is filled against the live book via _simulate_fill. Legs that
         can't fill (>0 stake but empty book) are skipped. Returns the fire_id,
-        or 0 if no leg filled."""
+        or 0 if no leg filled.
+
+        shadow_candidates: filtered-out buckets (from plan_fire's `rejected`).
+        Recorded as counterfactual rows linked to this fire — they place NOTHING
+        (no fill, no balance effect), only freeze the density/edge/price the
+        strategy saw so the levers can be evaluated post-resolution."""
         placed = []
         for b in bets:
             token_id = b.get("token_id") if b["side"] == "yes" else (b.get("no_token_id") or b.get("token_id"))
@@ -284,9 +289,26 @@ class PaperExecutor(BaseExecutor):
                 winset_kind=p.get("winset_kind"), winset_payload_json=p.get("winset_payload_json"),
                 price_trajectory_json="[]"))
 
+        # Counterfactual log — never placed, never debited. Frozen at decision
+        # time so a later lever analysis settles them against the same market.
+        for s in (shadow_candidates or []):
+            db.insert_shadow_bet(dict(
+                fire_id=fire_id, market_id=s.get("market_id"),
+                sub_market_condition_id=s.get("sub_market_condition_id"),
+                group_item_title=s.get("group_item_title"),
+                would_side=s.get("would_side"), skip_reason=s.get("skip_reason"),
+                ladder_idx=s.get("ladder_idx"), density=s.get("density"),
+                mid_price=s.get("mid_price"), edge=s.get("edge"),
+                in_core=s.get("in_core"), status="open",
+                resolved_outcome=None, hypo_pnl=None,
+                winset_kind=s.get("winset_kind"),
+                winset_payload_json=s.get("winset_payload_json")))
+
         db.update_balance(-total_staked)
         db.record_account_value()
-        print(f"[paper] FIRE {city} {resolution_date}  legs={len(placed)}  staked=${total_staked:.2f}")
+        n_shadow = len(shadow_candidates or [])
+        print(f"[paper] FIRE {city} {resolution_date}  legs={len(placed)}  "
+              f"staked=${total_staked:.2f}  shadow={n_shadow}")
         return fire_id
 
     # ── Position closing ──────────────────────────────────────────────────────

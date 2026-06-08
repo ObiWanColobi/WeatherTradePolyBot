@@ -1,9 +1,10 @@
 import json
 import sqlite3
 from datetime import datetime, timezone
-from config import DB_PATH, PAPER_STARTING_BALANCE
+from config import DB_PATH, SNAPSHOT_DB_PATH, PAPER_STARTING_BALANCE
 
 _DB_PATH = DB_PATH
+_SNAPSHOT_DB_PATH = SNAPSHOT_DB_PATH
 _MEM_CONN: sqlite3.Connection | None = None  # shared connection for :memory: testing
 
 
@@ -22,6 +23,20 @@ def get_conn() -> sqlite3.Connection:
             _MEM_CONN.row_factory = sqlite3.Row
         return _MEM_CONN
     conn = sqlite3.connect(_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def snapshot_conn() -> sqlite3.Connection:
+    """Connection to the SEPARATE shadow-snapshot DB (bucket_snapshots only).
+
+    Isolated from the paper-trading DB so the snapshot logger's nightly VACUUM
+    can never lock or risk live fires/bets. When DB_PATH is :memory: (tests),
+    the snapshot DB shares the in-memory connection so the suite stays single-file.
+    """
+    if _SNAPSHOT_DB_PATH == ":memory:" or _DB_PATH == ":memory:":
+        return get_conn()
+    conn = sqlite3.connect(_SNAPSHOT_DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -67,38 +82,9 @@ def init_db():
                 recorded_at TEXT    NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS bucket_snapshots (
-                id                       INTEGER PRIMARY KEY AUTOINCREMENT,
-                snapshot_at_utc          TEXT    NOT NULL,
-                event_slug               TEXT    NOT NULL,
-                event_end_iso            TEXT,
-                condition_id             TEXT,
-                city                     TEXT    NOT NULL,
-                kind                     TEXT    NOT NULL,       -- highest|lowest
-                resolution_date          TEXT    NOT NULL,       -- YYYY-MM-DD local
-                sub_market_id            TEXT    NOT NULL,       -- Polymarket market.id
-                sub_market_condition_id  TEXT    NOT NULL,
-                group_item_title         TEXT    NOT NULL,       -- e.g. "64-65°F"
-                bucket_type              TEXT    NOT NULL,       -- threshold|range|exact|tail
-                bound_lo_f               REAL,                   -- NULL for open-bottom tail
-                bound_hi_f               REAL,                   -- NULL for open-top tail
-                is_open_tail             INTEGER NOT NULL DEFAULT 0,
-                best_bid                 REAL,
-                best_ask                 REAL,
-                mid_price                REAL,
-                last_trade_price         REAL,
-                orderbook_bids_json      TEXT,                   -- JSON array of top-3 [price,size]
-                orderbook_asks_json      TEXT,                   -- JSON array of top-3 [price,size]
-                volume_24h               REAL,
-                liquidity_num            REAL,
-                raw_market_json          TEXT                    -- full market dict for forensics
-            );
-            CREATE INDEX IF NOT EXISTS idx_bucket_snap_city_date
-                ON bucket_snapshots (city, resolution_date);
-            CREATE INDEX IF NOT EXISTS idx_bucket_snap_event_slug
-                ON bucket_snapshots (event_slug);
-            CREATE INDEX IF NOT EXISTS idx_bucket_snap_snapshot_at
-                ON bucket_snapshots (snapshot_at_utc);
+            -- NOTE: bucket_snapshots now lives in the SEPARATE snapshot DB
+            -- (init_snapshot_db / snapshot_conn) so the logger's VACUUM can't
+            -- lock the paper DB. See config.SNAPSHOT_DB_PATH.
 
             -- Shotgun bot (2026-06-07): one parent row per (city, resolution-date)
             -- "fire", plus one child bet row per leg. Replaces the single-row-
@@ -142,6 +128,37 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_bets_fire ON shotgun_bets(fire_id);
             CREATE INDEX IF NOT EXISTS idx_bets_status ON shotgun_bets(status);
+
+            -- Counterfactual log: buckets that PASSED the cheap pre-filters
+            -- (volume/winset/mid) but were rejected by a strategy gate
+            -- (mass-core / price-band / edge). These were never placed (no
+            -- stake/fill/shares) and never touch balance or exposure — they
+            -- exist ONLY to answer "would loosening a lever have made money?"
+            -- after the fact. Settled via the SAME Polymarket resolution path as
+            -- real legs (see shotgun_resolver), so resolved_outcome is real;
+            -- hypo_pnl is the P&L a $1 notional stake WOULD have made.
+            CREATE TABLE IF NOT EXISTS shotgun_shadow_bets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fire_id INTEGER NOT NULL,
+                market_id TEXT,
+                sub_market_condition_id TEXT,
+                group_item_title TEXT,
+                would_side TEXT,            -- the side this bucket WOULD have been bet
+                skip_reason TEXT,           -- not-core | yes-price-band | no-cost>cap | edge<thresh
+                ladder_idx INTEGER,
+                density REAL,
+                mid_price REAL,
+                edge REAL,                  -- the would-side edge (yes: d-mid, no: mid-d)
+                in_core INTEGER,
+                status TEXT DEFAULT 'open',
+                resolved_outcome TEXT,      -- win | loss (had we taken would_side)
+                hypo_pnl REAL,              -- P&L of a $1 notional stake on would_side
+                winset_kind TEXT,
+                winset_payload_json TEXT,
+                FOREIGN KEY(fire_id) REFERENCES shotgun_fires(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_shadow_fire ON shotgun_shadow_bets(fire_id);
+            CREATE INDEX IF NOT EXISTS idx_shadow_status ON shotgun_shadow_bets(status);
         """)
 
         # Seed balance if first run
@@ -526,6 +543,51 @@ def init_db():
                   "Clean the DB and restart to enable the guardrail.")
 
 
+def init_snapshot_db():
+    """Create the bucket_snapshots schema in the SEPARATE snapshot DB.
+
+    Called by the shadow snapshot logger (and its rollup/cleanup scripts) — NOT
+    by the paper bot. Isolated so the logger's nightly VACUUM operates on its own
+    file and can never lock or risk the paper-trading DB. When DB_PATH is :memory:
+    (tests) snapshot_conn() shares the in-memory connection, so this is a no-op-
+    safe addition to whatever init_db already created."""
+    with snapshot_conn() as conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS bucket_snapshots (
+                id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_at_utc          TEXT    NOT NULL,
+                event_slug               TEXT    NOT NULL,
+                event_end_iso            TEXT,
+                condition_id             TEXT,
+                city                     TEXT    NOT NULL,
+                kind                     TEXT    NOT NULL,       -- highest|lowest
+                resolution_date          TEXT    NOT NULL,       -- YYYY-MM-DD local
+                sub_market_id            TEXT    NOT NULL,       -- Polymarket market.id
+                sub_market_condition_id  TEXT    NOT NULL,
+                group_item_title         TEXT    NOT NULL,       -- e.g. "64-65°F"
+                bucket_type              TEXT    NOT NULL,       -- threshold|range|exact|tail
+                bound_lo_f               REAL,                   -- NULL for open-bottom tail
+                bound_hi_f               REAL,                   -- NULL for open-top tail
+                is_open_tail             INTEGER NOT NULL DEFAULT 0,
+                best_bid                 REAL,
+                best_ask                 REAL,
+                mid_price                REAL,
+                last_trade_price         REAL,
+                orderbook_bids_json      TEXT,                   -- JSON array of top-3 [price,size]
+                orderbook_asks_json      TEXT,                   -- JSON array of top-3 [price,size]
+                volume_24h               REAL,
+                liquidity_num            REAL,
+                raw_market_json          TEXT                    -- full market dict for forensics
+            );
+            CREATE INDEX IF NOT EXISTS idx_bucket_snap_city_date
+                ON bucket_snapshots (city, resolution_date);
+            CREATE INDEX IF NOT EXISTS idx_bucket_snap_event_slug
+                ON bucket_snapshots (event_slug);
+            CREATE INDEX IF NOT EXISTS idx_bucket_snap_snapshot_at
+                ON bucket_snapshots (snapshot_at_utc);
+        """)
+
+
 def _safe_add_column(conn: sqlite3.Connection, table: str, column: str, col_type: str):
     try:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
@@ -889,6 +951,51 @@ def insert_bet(bet: dict) -> int:
         return cur.lastrowid
 
 
+def insert_shadow_bet(bet: dict) -> int:
+    """Insert one counterfactual (filtered-out) bucket row. Returns the new id.
+
+    Shadow bets are never placed (no balance effect) — they record what the
+    strategy reviewed and rejected, so the levers can be evaluated post-hoc."""
+    cols         = ", ".join(bet.keys())
+    placeholders = ", ".join("?" for _ in bet)
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"INSERT INTO shotgun_shadow_bets ({cols}) VALUES ({placeholders})",
+            list(bet.values()),
+        )
+        return cur.lastrowid
+
+
+def get_open_shadow_bets() -> list[dict]:
+    """Return all shadow bets still in status='open' (awaiting resolution)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM shotgun_shadow_bets WHERE status = 'open'"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_shadow_bets_for_fire(fire_id: int) -> list[dict]:
+    """Return every shadow (filtered-out) candidate for a fire, any status."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM shotgun_shadow_bets WHERE fire_id = ?", (fire_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_shadow_bet(shadow_id: int, updates: dict):
+    """Patch columns on a single shadow bet row."""
+    if not updates:
+        return
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE shotgun_shadow_bets SET {set_clause} WHERE id = ?",
+            [*updates.values(), shadow_id],
+        )
+
+
 def get_fired_city_days() -> set[tuple[str, str]]:
     """Return the set of (city, resolution_date) pairs already fired on.
 
@@ -993,6 +1100,7 @@ def reset_paper_trading():
     with get_conn() as conn:
         conn.execute("DELETE FROM trades")
         conn.execute("DELETE FROM shotgun_bets")
+        conn.execute("DELETE FROM shotgun_shadow_bets")
         conn.execute("DELETE FROM shotgun_fires")
         conn.execute("DELETE FROM balance_history")
         conn.execute(
