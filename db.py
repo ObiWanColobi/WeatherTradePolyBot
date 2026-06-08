@@ -927,6 +927,27 @@ def get_open_exposure() -> float:
         return float(row[0] or 0.0)
 
 
+def get_fires_with_rollup() -> list[dict]:
+    """Each fire + aggregated leg stats, newest first, for the dashboard card view."""
+    conn = get_conn()
+    fires = [dict(r) for r in conn.execute(
+        "SELECT * FROM shotgun_fires ORDER BY fired_at_utc DESC").fetchall()]
+    for f in fires:
+        agg = conn.execute(
+            """SELECT COUNT(*) AS n,
+                      COALESCE(SUM(stake_usd),0) AS staked,
+                      COALESCE(SUM(pnl),0) AS pnl,
+                      SUM(CASE WHEN resolved_outcome='win' THEN 1 ELSE 0 END) AS wins,
+                      SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) AS open_legs
+               FROM shotgun_bets WHERE fire_id=?""", (f["id"],)).fetchone()
+        f["legs"] = agg["n"]
+        f["staked"] = agg["staked"]
+        f["pnl"] = agg["pnl"]
+        f["wins"] = agg["wins"] or 0
+        f["open_legs"] = agg["open_legs"] or 0
+    return fires
+
+
 def update_bet(bet_id: int, updates: dict):
     """Patch columns on a single shotgun bet row."""
     if not updates:
