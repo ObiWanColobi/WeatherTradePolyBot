@@ -25,7 +25,18 @@ def buckets_from_event(event: dict, city: str, resolution_date: str) -> list[dic
         btype = classify_bucket_type(gtitle)
         is_open_tail = 1 if ((lo_f is None or hi_f is None) and btype == "tail") else 0
         bb, ba = _to_float(m.get("bestBid")), _to_float(m.get("bestAsk"))
-        mid = (bb + ba) / 2 if (bb and ba and bb > 0 and ba > 0) else None
+        # _to_float returns None when missing; never use truthiness on the
+        # numbers themselves (0.0 is falsy — a 0.0 bid would short-circuit `and`
+        # and silently drop edge-rich cheap-tail buckets). Use explicit None
+        # checks. Both sides valid -> true midpoint; else fall back to best_ask
+        # as the price proxy so no/zero-bid tail buckets stay in the spread
+        # (the paper fill sim crosses the ask at order time anyway).
+        if bb is not None and ba is not None and bb > 0 and ba > 0:
+            mid = (bb + ba) / 2
+        elif ba is not None and ba > 0:
+            mid = ba
+        else:
+            mid = None
         token_ids = m.get("clobTokenIds")
         yes_tok = no_tok = None
         if token_ids:

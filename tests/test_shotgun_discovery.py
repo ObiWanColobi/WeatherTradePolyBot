@@ -29,6 +29,16 @@ def test_buckets_from_event_handles_missing_book():
     assert out[0]["mid_price"] is None   # no priceable book
 
 
+def test_zero_bid_bucket_uses_ask_as_price_proxy():
+    from shotgun_discovery import buckets_from_event
+    event = {"slug": "s", "endDate": "z", "markets": [
+        {"id": "9", "conditionId": "m9", "groupItemTitle": "85-86°F",
+         "bestBid": 0.0, "bestAsk": 0.03, "volume24hr": 300, "liquidityNum": 50,
+         "clobTokenIds": '["t9","n9"]'}]}
+    b = buckets_from_event(event, "x", "d")[0]
+    assert b["mid_price"] == 0.03   # zero bid -> ask proxy, NOT dropped to None
+
+
 def test_discover_city_days_groups_by_event(monkeypatch):
     fake_event = {
         "slug": "highest-temperature-in-toronto-on-june-10-2026",

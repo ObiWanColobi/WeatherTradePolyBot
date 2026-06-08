@@ -582,6 +582,16 @@ def record_account_value():
             for t in open_trades
         )
 
+        # Shotgun bets live in their own table (shotgun_bets), not `trades`.
+        # Carry open shotgun exposure at cost (same convention as open trades
+        # above) so the recorded equity series doesn't sag on each fire and
+        # jump on settle. Without this the historical balance chart
+        # misrepresents paper P&L over the hold period.
+        sb = conn.execute(
+            "SELECT COALESCE(SUM(stake_usd), 0) FROM shotgun_bets WHERE status = 'open'"
+        ).fetchone()
+        position_value += float(sb[0] or 0.0)
+
         account_value = cash + position_value
         conn.execute(
             "INSERT INTO balance_history (amount, recorded_at) VALUES (?, ?)",
