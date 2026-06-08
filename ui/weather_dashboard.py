@@ -118,7 +118,7 @@ with st.sidebar:
         f"{len(active_fires)} active · {len(closed_fires)} closed fires · "
         f"${cash:,.2f} cash"
     )
-    st.caption("Resets balance + balance history. (Fires/bets are managed by the bot.)")
+    st.caption("Resets balance + clears all fires/bets + balance history.")
     if "confirm_reset" not in st.session_state:
         st.session_state.confirm_reset = False
 

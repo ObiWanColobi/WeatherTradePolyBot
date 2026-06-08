@@ -976,12 +976,14 @@ def update_fire(fire_id: int, updates: dict):
 
 def reset_paper_trading():
     """
-    Wipe all trades and balance history, reset balance to starting value.
-    Used when the user wants a clean slate on paper trading restart.
+    Wipe all trades, shotgun fires/bets, and balance history; reset balance to
+    starting value. Used when the user wants a clean slate on paper trading restart.
     """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
     with get_conn() as conn:
         conn.execute("DELETE FROM trades")
+        conn.execute("DELETE FROM shotgun_bets")
+        conn.execute("DELETE FROM shotgun_fires")
         conn.execute("DELETE FROM balance_history")
         conn.execute(
             "UPDATE balance SET amount = ?, updated_at = ? WHERE id = 1",
