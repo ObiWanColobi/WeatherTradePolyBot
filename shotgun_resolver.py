@@ -49,9 +49,60 @@ def settle_due_fires(truth_fn) -> int:
     return total
 
 
+def settle_leg_polymarket(bet: dict, resolution_fetch) -> bool:
+    """Settle ONE open leg using Polymarket's resolution. Returns True if it was
+    settled (resolved), False if not resolved yet / fetch failed (leg left open).
+    resolution_fetch(condition_id) -> get_resolution_status shape (injected for tests)."""
+    if bet["status"] != "open":
+        return False
+    res = resolution_fetch(bet["sub_market_condition_id"])
+    if not res or not res.get("resolved"):
+        return False
+    bucket_hit = res.get("yes_price") == 1.0
+    won = bucket_hit if bet["side"] == "yes" else (not bucket_hit)
+    proceeds = bet["shares"] * 1.0 if won else 0.0
+    pnl = proceeds - bet["stake_usd"]
+    db.update_bet(bet["id"], dict(
+        status="closed", resolved_outcome=("win" if won else "loss"), pnl=pnl))
+    if proceeds > 0:
+        db.update_balance(proceeds)
+    return True
+
+
+def settle_due_fires_polymarket(resolution_fetch=None) -> int:
+    """For every open fire, try to settle each open leg via Polymarket resolution.
+    A fire is closed only once all its legs are closed. Returns # legs settled.
+    resolution_fetch defaults to markets.polymarket.get_resolution_status."""
+    if resolution_fetch is None:
+        from markets.polymarket import get_resolution_status as resolution_fetch
+    settled = 0
+    for fire in db.get_open_fires():
+        legs = db.get_all_bets_for_fire(fire["id"])
+        for leg in legs:
+            if leg["status"] != "open":
+                continue
+            if settle_leg_polymarket(leg, resolution_fetch):
+                settled += 1
+        # re-read legs; close the fire only if none remain open
+        still_open = [b for b in db.get_all_bets_for_fire(fire["id"]) if b["status"] == "open"]
+        if not still_open:
+            db.update_fire(fire["id"], dict(status="closed"))
+    if settled:
+        db.record_account_value()
+    return settled
+
+
 def live_truth(city: str, resolution_date: str) -> float | None:
     """Observed daily-max °F for (city, resolution_date) from the live DB, or None
     if not yet known.
+
+    NOTE: this temperature-lookup path is NO LONGER the live settlement path.
+    The LIVE bot settles shotgun legs via settle_due_fires_polymarket(), which
+    asks Polymarket how each bucket market resolved (the most faithful proxy for
+    real paper-trading P&L). This function and the temperature-based
+    settle_fire()/settle_due_fires() are retained ONLY for backtest-parity
+    reconciliation (the research harness settles against a known daily-max). It
+    stays stubbed (returns None) so the temperature path never fires in prod.
 
     TODO(wiring): not yet wired to a clean live source — returns None always.
 
