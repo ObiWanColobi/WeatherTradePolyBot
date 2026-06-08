@@ -302,6 +302,10 @@ OPEN_METEO_ARCHIVE_API  = "https://archive-api.open-meteo.com/v1/archive"
 
 # ── Database ──────────────────────────────────────────────────────────────────
 DB_PATH = "weather_bot.db"
+# Test/CI isolation hook — when set, point the DB at the override path so a
+# `importlib.reload(config); importlib.reload(db)` picks up a throwaway file
+# instead of clobbering the production DB. No-op in normal operation.
+DB_PATH = os.environ.get("DB_PATH_OVERRIDE", DB_PATH)
 
 
 # ── Live-Mode Override Application ────────────────────────────────────────────

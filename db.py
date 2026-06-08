@@ -99,6 +99,49 @@ def init_db():
                 ON bucket_snapshots (event_slug);
             CREATE INDEX IF NOT EXISTS idx_bucket_snap_snapshot_at
                 ON bucket_snapshots (snapshot_at_utc);
+
+            -- Shotgun bot (2026-06-07): one parent row per (city, resolution-date)
+            -- "fire", plus one child bet row per leg. Replaces the single-row-
+            -- per-trade model for the dist-shotgun strategy (~10-20 legs held to
+            -- resolution per fire).
+            CREATE TABLE IF NOT EXISTS shotgun_fires (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fired_at_utc TEXT NOT NULL,
+                city TEXT NOT NULL,
+                resolution_date TEXT NOT NULL,
+                lead_hours REAL,
+                center_f REAL,
+                density_json TEXT,
+                budget_usd REAL,
+                total_staked_usd REAL,
+                n_legs INTEGER,
+                status TEXT DEFAULT 'open'
+            );
+
+            CREATE TABLE IF NOT EXISTS shotgun_bets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fire_id INTEGER NOT NULL,
+                market_id TEXT,
+                sub_market_condition_id TEXT,
+                group_item_title TEXT,
+                side TEXT,
+                ladder_idx INTEGER,
+                density REAL,
+                mid_price REAL,
+                edge REAL,
+                stake_usd REAL,
+                fill_price REAL,
+                shares REAL,
+                status TEXT DEFAULT 'open',
+                resolved_outcome TEXT,
+                pnl REAL,
+                winset_kind TEXT,
+                winset_payload_json TEXT,
+                price_trajectory_json TEXT,
+                FOREIGN KEY(fire_id) REFERENCES shotgun_fires(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_bets_fire ON shotgun_bets(fire_id);
+            CREATE INDEX IF NOT EXISTS idx_bets_status ON shotgun_bets(status);
         """)
 
         # Seed balance if first run
@@ -808,6 +851,104 @@ def get_open_city_date_counts() -> dict[tuple[str, str], int]:
             key = (r["city"].lower(), r["end_date"][:10])
             counts[key] = counts.get(key, 0) + 1
     return counts
+
+
+# ── Shotgun fires + bets ──────────────────────────────────────────────────────
+
+def insert_fire(fire: dict) -> int:
+    """Insert one parent shotgun fire row. Returns the new row id."""
+    cols         = ", ".join(fire.keys())
+    placeholders = ", ".join("?" for _ in fire)
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"INSERT INTO shotgun_fires ({cols}) VALUES ({placeholders})",
+            list(fire.values()),
+        )
+        return cur.lastrowid
+
+
+def insert_bet(bet: dict) -> int:
+    """Insert one child shotgun bet (leg) row. Returns the new row id."""
+    cols         = ", ".join(bet.keys())
+    placeholders = ", ".join("?" for _ in bet)
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"INSERT INTO shotgun_bets ({cols}) VALUES ({placeholders})",
+            list(bet.values()),
+        )
+        return cur.lastrowid
+
+
+def get_fired_city_days() -> set[tuple[str, str]]:
+    """Return the set of (city, resolution_date) pairs already fired on.
+
+    Used by the shotgun bot to enforce one-fire-per-(city, resolution-date).
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT city, resolution_date FROM shotgun_fires"
+        ).fetchall()
+    return {(r["city"], r["resolution_date"]) for r in rows}
+
+
+def get_open_fires() -> list[dict]:
+    """Return all shotgun fires still in status='open'."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM shotgun_fires WHERE status = 'open'"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_open_bets() -> list[dict]:
+    """Return all shotgun bets (legs) still in status='open'."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM shotgun_bets WHERE status = 'open'"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_all_bets_for_fire(fire_id: int) -> list[dict]:
+    """Return every bet (leg) belonging to a fire, regardless of status."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM shotgun_bets WHERE fire_id = ?", (fire_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_open_exposure() -> float:
+    """Return total staked USD across all open shotgun bets."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(stake_usd), 0) FROM shotgun_bets WHERE status = 'open'"
+        ).fetchone()
+        return float(row[0] or 0.0)
+
+
+def update_bet(bet_id: int, updates: dict):
+    """Patch columns on a single shotgun bet row."""
+    if not updates:
+        return
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE shotgun_bets SET {set_clause} WHERE id = ?",
+            [*updates.values(), bet_id],
+        )
+
+
+def update_fire(fire_id: int, updates: dict):
+    """Patch columns on a single shotgun fire row."""
+    if not updates:
+        return
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE shotgun_fires SET {set_clause} WHERE id = ?",
+            [*updates.values(), fire_id],
+        )
 
 
 # ── Reset / recovery ─────────────────────────────────────────────────────────
