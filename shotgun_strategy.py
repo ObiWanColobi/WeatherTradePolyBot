@@ -41,7 +41,11 @@ def plan_fire(
       best_bid, best_ask, liquidity_num, volume_24h, token_id, no_token_id, market_id.
     coords: {"lat","lon","tz"}. ensemble_fetch(lat,lon,tz) -> get_ensemble_forecasts shape.
     """
-    ensemble = ensemble_fetch(coords["lat"], coords["lon"], coords.get("tz", "auto"))
+    lat = coords.get("lat")
+    lon = coords.get("lon")
+    if lat is None or lon is None:
+        return []
+    ensemble = ensemble_fetch(lat, lon, coords.get("tz", "auto"))
     members_f = members_f_for_date(ensemble, resolution_date)
     center_f, density = build_density(members_f)
     if center_f is None:
@@ -58,19 +62,24 @@ def plan_fire(
             continue
         d = winset_density(ws, ladder, density)
         try:
-            if ws[0] == "closed" and ws[1]:
+            if ws[0] == "closed":
+                if not ws[1]:
+                    continue          # malformed closed winset — don't misclassify
                 rep = ws[1][len(ws[1]) // 2]
                 idx = daily_max_to_bucket_idx(rep, ladder)
             elif ws[0] == "tail_bottom":
                 idx = 0
-            else:
+            elif ws[0] == "tail_top":
                 idx = len(ladder) - 1
+            else:
+                continue              # unknown winset kind — skip, don't misclassify
         except ValueError:
             continue
         mid = m.get("mid_price")
         if mid is None:
             continue
         rows.append(dict(
+            # bucket_idx is the DB-schema alias for ladder_idx (always equal)
             ladder_idx=idx, density=float(d), mid_price=float(mid),
             sub_market_condition_id=m.get("sub_market_condition_id"),
             group_item_title=m.get("group_item_title"),

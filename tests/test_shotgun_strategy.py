@@ -65,3 +65,24 @@ def test_plan_fire_skips_low_volume_buckets():
         ensemble_fetch=_fake_ensemble,
     )
     assert bets == []   # both buckets have volume_24h=500 < 10000
+
+
+def test_plan_fire_skips_bucket_with_missing_bound():
+    from shotgun_strategy import plan_fire, ShotgunConfig
+    broken = dict(sub_market_condition_id="bad", group_item_title="??",
+                  bound_lo_f=None, bound_hi_f=70.0, is_open_tail=0, mid_price=0.20,
+                  best_bid=0.19, best_ask=0.21, liquidity_num=1000, volume_24h=500,
+                  token_id="t1", no_token_id="n1", market_id="mk1")
+    bets = plan_fire(city="toronto", resolution_date="2026-06-10", buckets=[broken],
+                     cfg=ShotgunConfig(edge_threshold=0.05, mass_core_frac=0.9),
+                     coords={"lat":43.7,"lon":-79.4,"tz":"America/Toronto"},
+                     ensemble_fetch=lambda *a: [{"date":"2026-06-10","member_temps":[21.0]*10}])
+    assert bets == []   # non-tail market with a None bound -> compute_winset None -> skipped
+
+
+def test_plan_fire_returns_empty_on_missing_coords():
+    from shotgun_strategy import plan_fire, ShotgunConfig
+    bets = plan_fire(city="toronto", resolution_date="2026-06-10", buckets=[],
+                     cfg=ShotgunConfig(), coords={},
+                     ensemble_fetch=lambda *a: [{"date":"2026-06-10","member_temps":[21.0]*10}])
+    assert bets == []   # missing lat/lon -> graceful []

@@ -171,5 +171,7 @@ def build_bucket_bets(
         bet = dict(r)
         bet["side"] = side
         bet["stake_usd"] = stake
+        if side == "no":
+            bet["edge"] = r["mid_price"] - r["density"]   # NO-side edge; YES edge was density - mid
         bets.append(bet)
     return bets
