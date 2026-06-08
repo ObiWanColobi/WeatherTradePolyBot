@@ -73,6 +73,36 @@ def test_run_fire_pass_respects_exposure_cap(monkeypatch):
     assert ("toronto","2026-06-10") not in db.get_fired_city_days()   # blocked by cap
 
 
+def test_run_fire_pass_isolates_one_bad_cityday(monkeypatch):
+    db = _fresh(monkeypatch)
+    import weather_bot; importlib.reload(weather_bot)
+    monkeypatch.setattr(weather_bot, "discover_city_days", lambda cities, days_ahead: {
+        ("badcity", "2026-06-10"): [dict(sub_market_condition_id="mb", market_id="mkb",
+            group_item_title="69-70°F", bound_lo_f=69.0, bound_hi_f=70.0, is_open_tail=0,
+            mid_price=0.20, best_bid=0.19, best_ask=0.21, volume_24h=500, liquidity_num=1000,
+            token_id="tb", no_token_id="nb", city="badcity", resolution_date="2026-06-10")],
+        ("toronto", "2026-06-10"): [dict(sub_market_condition_id="m1", market_id="mk1",
+            group_item_title="69-70°F", bound_lo_f=69.0, bound_hi_f=70.0, is_open_tail=0,
+            mid_price=0.20, best_bid=0.19, best_ask=0.21, volume_24h=500, liquidity_num=1000,
+            token_id="t1", no_token_id="n1", city="toronto", resolution_date="2026-06-10")]})
+    monkeypatch.setattr(weather_bot, "in_fire_window", lambda *a, **k: True)
+    monkeypatch.setattr(weather_bot, "hours_to_close", lambda c, d, now=None: 12.0)
+    monkeypatch.setattr(weather_bot, "_ensemble_fetch", lambda lat, lon, tz: [{"date":"2026-06-10","member_temps":[21.0]*10}])
+    monkeypatch.setattr(weather_bot, "_coords_for", lambda city: {"lat":43.7,"lon":-79.4,"tz":"America/Toronto"})
+    monkeypatch.setattr(weather_bot._executor, "_simulate_fill", lambda t, s, sz: (0.21, sz))
+    # badcity's market raises in place_fire (simulated upstream/fill failure); toronto delegates to real place_fire.
+    real_place = weather_bot._executor.place_fire
+    def flaky_place(city, resolution_date, **kw):
+        if city == "badcity":
+            raise RuntimeError("simulated upstream failure")
+        return real_place(city=city, resolution_date=resolution_date, **kw)
+    monkeypatch.setattr(weather_bot._executor, "place_fire", flaky_place)
+    weather_bot.run_fire_pass()
+    fired = db.get_fired_city_days()
+    assert ("toronto", "2026-06-10") in fired        # good city still fired
+    assert ("badcity", "2026-06-10") not in fired    # bad city isolated, didn't abort the pass
+
+
 def test_run_resolve_pass_settles(monkeypatch):
     db = _fresh(monkeypatch)
     fid = db.insert_fire(dict(fired_at_utc="t", city="x", resolution_date="d", lead_hours=1.0,

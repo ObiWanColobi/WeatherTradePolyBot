@@ -33,8 +33,13 @@ def plan_fire(
     cfg: ShotgunConfig,
     coords: dict,
     ensemble_fetch: Callable,
-) -> list[dict]:
-    """Return the sized bet list for this city-day (or [] if no fire).
+) -> tuple[list[dict], float | None, list | None]:
+    """Return (bets, center_f, density) for this city-day.
+
+    Returns ([], None, None) when there is no usable ensemble; ([], center_f,
+    density) when the ensemble is fine but no bets pass the filters. Returning
+    the center_f/density computed here lets the caller persist the EXACT
+    provenance the bets were sized against (no second fetch, no update race).
 
     buckets: live sub-market dicts. Each needs: sub_market_condition_id,
       group_item_title, bound_lo_f, bound_hi_f, is_open_tail, mid_price,
@@ -44,12 +49,12 @@ def plan_fire(
     lat = coords.get("lat")
     lon = coords.get("lon")
     if lat is None or lon is None:
-        return []
+        return [], None, None
     ensemble = ensemble_fetch(lat, lon, coords.get("tz", "auto"))
     members_f = members_f_for_date(ensemble, resolution_date)
     center_f, density = build_density(members_f)
     if center_f is None:
-        return []
+        return [], None, None
     ladder = build_ladder(center_f)
     dv = list(density)
 
@@ -94,11 +99,11 @@ def plan_fire(
         ))
 
     if not rows:
-        return []
+        return [], center_f, density
 
     bets = build_bucket_bets(
         rows, dv, cfg.mode, cfg.mass_core_frac, cfg.edge_threshold,
         cfg.price_min, cfg.price_max, cfg.sizing_mode, cfg.budget_per_city_day,
     )
     bets = apply_liquidity_cap(bets, cfg.per_bucket_liq_cap_frac)
-    return bets
+    return bets, center_f, density

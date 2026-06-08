@@ -22,11 +22,13 @@ def _buckets():
 def test_plan_fire_returns_sized_bets():
     cfg = ShotgunConfig(edge_threshold=0.05, mass_core_frac=0.9, budget_per_city_day=50.0,
                         per_bucket_liq_cap_frac=0.10)
-    bets = plan_fire(
+    bets, center_f, density = plan_fire(
         city="toronto", resolution_date="2026-06-10", buckets=_buckets(),
         cfg=cfg, coords={"lat": 43.7, "lon": -79.4, "tz": "America/Toronto"},
         ensemble_fetch=_fake_ensemble,
     )
+    assert center_f is not None
+    assert density
     assert len(bets) >= 1
     for b in bets:
         assert b["side"] in ("yes", "no")
@@ -39,7 +41,7 @@ def test_plan_fire_returns_sized_bets():
 
 def test_plan_fire_empty_when_no_ensemble():
     cfg = ShotgunConfig()
-    bets = plan_fire(
+    bets, _, _ = plan_fire(
         city="toronto", resolution_date="2099-01-01", buckets=_buckets(), cfg=cfg,
         coords={"lat": 43.7, "lon": -79.4, "tz": "America/Toronto"},
         ensemble_fetch=lambda *a: [],
@@ -49,7 +51,7 @@ def test_plan_fire_empty_when_no_ensemble():
 
 def test_plan_fire_empty_when_no_edge():
     cfg = ShotgunConfig(edge_threshold=0.99)
-    bets = plan_fire(
+    bets, _, _ = plan_fire(
         city="toronto", resolution_date="2026-06-10", buckets=_buckets(), cfg=cfg,
         coords={"lat": 43.7, "lon": -79.4, "tz": "America/Toronto"},
         ensemble_fetch=_fake_ensemble,
@@ -59,7 +61,7 @@ def test_plan_fire_empty_when_no_edge():
 
 def test_plan_fire_skips_low_volume_buckets():
     cfg = ShotgunConfig(edge_threshold=0.05, mass_core_frac=0.9, vol_min=10000)
-    bets = plan_fire(
+    bets, _, _ = plan_fire(
         city="toronto", resolution_date="2026-06-10", buckets=_buckets(), cfg=cfg,
         coords={"lat": 43.7, "lon": -79.4, "tz": "America/Toronto"},
         ensemble_fetch=_fake_ensemble,
@@ -73,7 +75,7 @@ def test_plan_fire_skips_bucket_with_missing_bound():
                   bound_lo_f=None, bound_hi_f=70.0, is_open_tail=0, mid_price=0.20,
                   best_bid=0.19, best_ask=0.21, liquidity_num=1000, volume_24h=500,
                   token_id="t1", no_token_id="n1", market_id="mk1")
-    bets = plan_fire(city="toronto", resolution_date="2026-06-10", buckets=[broken],
+    bets, _, _ = plan_fire(city="toronto", resolution_date="2026-06-10", buckets=[broken],
                      cfg=ShotgunConfig(edge_threshold=0.05, mass_core_frac=0.9),
                      coords={"lat":43.7,"lon":-79.4,"tz":"America/Toronto"},
                      ensemble_fetch=lambda *a: [{"date":"2026-06-10","member_temps":[21.0]*10}])
@@ -82,7 +84,7 @@ def test_plan_fire_skips_bucket_with_missing_bound():
 
 def test_plan_fire_returns_empty_on_missing_coords():
     from shotgun_strategy import plan_fire, ShotgunConfig
-    bets = plan_fire(city="toronto", resolution_date="2026-06-10", buckets=[],
+    bets, _, _ = plan_fire(city="toronto", resolution_date="2026-06-10", buckets=[],
                      cfg=ShotgunConfig(), coords={},
                      ensemble_fetch=lambda *a: [{"date":"2026-06-10","member_temps":[21.0]*10}])
     assert bets == []   # missing lat/lon -> graceful []

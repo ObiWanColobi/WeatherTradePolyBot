@@ -21,7 +21,6 @@ from executor import create_executor
 from shotgun_strategy import plan_fire, ShotgunConfig
 from shotgun_discovery import discover_city_days
 from shotgun.fire_window import in_fire_window, hours_to_close
-from shotgun.forecast import members_f_for_date, build_density
 import shotgun_resolver
 from markets.open_meteo import get_ensemble_forecasts
 from markets.polymarket import get_resolution_status
@@ -76,27 +75,29 @@ def run_fire_pass():
         if not in_fire_window(city, rd, SHOTGUN["fire_window_hours"]):
             continue
         if db.get_open_exposure() >= cap:
-            print(f"[bot] exposure cap hit (${db.get_open_exposure():.0f}/${cap:.0f}) — skip {city} {rd}")
-            break
-        coords = _coords_for(city)
-        if not coords:
-            print(f"[bot] no coords for {city} — skip")
+            print(f"[bot] exposure cap hit (${db.get_open_exposure():.0f}/${cap:.0f}) — stop firing this poll")
+            break   # intentional: stop firing entirely once cap reached (accepts discovery-order bias)
+        try:
+            coords = _coords_for(city)
+            if not coords:
+                print(f"[bot] no coords for {city} — skip")
+                continue
+            bets, center_f, density = plan_fire(city, rd, buckets, cfg, coords, _ensemble_fetch)
+            if not bets:
+                continue
+            lead = hours_to_close(city, rd) or 0.0
+            fire_id = _executor.place_fire(
+                city=city, resolution_date=rd, lead_hours=lead,
+                center_f=center_f or 0.0, density_json=json.dumps(density or []),
+                budget_usd=SHOTGUN["budget_per_city_day"], bets=bets)
+            if fire_id:
+                staked = sum(b["stake_usd"] for b in bets)
+                print(f"[bot] FIRED {city} {rd} — {len(bets)} legs @ {lead:.1f}h to close")
+                notify("info", "Shotgun Fire", f"{city} {rd}: {len(bets)} legs",
+                       fields={"lead_h": f"{lead:.1f}", "staked": f"${staked:.2f}"})
+        except Exception as e:
+            print(f"[bot] fire failed for {city} {rd} (non-fatal): {e}")
             continue
-        bets = plan_fire(city, rd, buckets, cfg, coords, _ensemble_fetch)
-        if not bets:
-            continue
-        lead = hours_to_close(city, rd) or 0.0
-        ens = _ensemble_fetch(coords["lat"], coords["lon"], coords.get("tz", "auto"))
-        center_f, density = build_density(members_f_for_date(ens, rd))
-        fire_id = _executor.place_fire(
-            city=city, resolution_date=rd, lead_hours=lead,
-            center_f=center_f or 0.0, density_json=json.dumps(density or []),
-            budget_usd=SHOTGUN["budget_per_city_day"], bets=bets)
-        if fire_id:
-            staked = sum(b["stake_usd"] for b in bets)
-            print(f"[bot] FIRED {city} {rd} — {len(bets)} legs @ {lead:.1f}h to close")
-            notify("info", "Shotgun Fire", f"{city} {rd}: {len(bets)} legs",
-                   fields={"lead_h": f"{lead:.1f}", "staked": f"${staked:.2f}"})
 
 
 def _dry_run_report():
@@ -111,7 +112,8 @@ def _dry_run_report():
         coords = _coords_for(city)
         n = 0
         if win and coords:
-            n = len(plan_fire(city, rd, buckets, cfg, coords, _ensemble_fetch))
+            bets, _, _ = plan_fire(city, rd, buckets, cfg, coords, _ensemble_fetch)
+            n = len(bets)
         h_str = f"{h:.1f}h" if h is not None else "n/a"
         print(f"  [dry] {city:<14} {rd}  to_close={h_str}  in_window={win}  would_fire={n}_legs")
 
@@ -137,6 +139,10 @@ def run(dry_run: bool = False):
                 run_fire_pass()
         except Exception as e:
             print(f"[bot] poll error (non-fatal): {e}")
+            try:
+                notify("error", "Shotgun bot poll error", str(e))
+            except Exception:
+                pass
         try:
             health.write_heartbeat(hb, poll_count=poll,
                                    open_positions=len(db.get_open_bets()), balance=db.get_balance())
