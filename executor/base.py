@@ -49,6 +49,12 @@ class BaseExecutor(ABC):
                      are not already tracked in the DB so the bot can manage them.
         """
 
+    def place_fire(self, city, resolution_date, lead_hours, center_f, density_json,
+                   budget_usd, bets):
+        """Record a shotgun fire (parent) + leg bets. Returns fire_id (0 if none placed).
+        Paper mode implements this; live mode added later."""
+        raise NotImplementedError
+
     def process_pending_claims(self):
         """
         Process on-chain claims for resolved winning trades.

@@ -242,6 +242,53 @@ class PaperExecutor(BaseExecutor):
         print(f"              Size: ${filled_usdc:.2f}  Fill: {fill_price:.4f}  "
               f"Slippage: {slippage:.4f}")
 
+    # ── Shotgun fire (parent + leg bets) ──────────────────────────────────────
+
+    def place_fire(self, city: str, resolution_date: str, lead_hours: float,
+                   center_f: float, density_json: str, budget_usd: float,
+                   bets: list[dict]) -> int:
+        """Record one shotgun fire (parent) + all its leg bets (children).
+        Each leg is filled against the live book via _simulate_fill. Legs that
+        can't fill (>0 stake but empty book) are skipped. Returns the fire_id,
+        or 0 if no leg filled."""
+        placed = []
+        for b in bets:
+            token_id = b.get("token_id") if b["side"] == "yes" else (b.get("no_token_id") or b.get("token_id"))
+            if not token_id or b["stake_usd"] <= 0:
+                continue
+            fill_price, filled_usdc = self._simulate_fill(token_id, "BUY", b["stake_usd"])
+            if filled_usdc <= 0 or fill_price <= 0:
+                continue
+            shares = filled_usdc / fill_price
+            placed.append({**b, "fill_price": fill_price, "stake_usd": filled_usdc, "shares": shares})
+
+        if not placed:
+            return 0
+
+        total_staked = sum(p["stake_usd"] for p in placed)
+        fire_id = db.insert_fire(dict(
+            fired_at_utc=datetime.now(timezone.utc).isoformat(), city=city,
+            resolution_date=resolution_date, lead_hours=lead_hours, center_f=center_f,
+            density_json=density_json, budget_usd=budget_usd, total_staked_usd=total_staked,
+            n_legs=len(placed), status="open"))
+
+        for p in placed:
+            db.insert_bet(dict(
+                fire_id=fire_id, market_id=p.get("market_id"),
+                sub_market_condition_id=p.get("sub_market_condition_id"),
+                group_item_title=p.get("group_item_title"), side=p["side"],
+                ladder_idx=p.get("ladder_idx"), density=p.get("density"),
+                mid_price=p.get("mid_price"), edge=p.get("edge"), stake_usd=p["stake_usd"],
+                fill_price=p["fill_price"], shares=p["shares"], status="open",
+                resolved_outcome=None, pnl=None,
+                winset_kind=p.get("winset_kind"), winset_payload_json=p.get("winset_payload_json"),
+                price_trajectory_json="[]"))
+
+        db.update_balance(-total_staked)
+        db.record_account_value()
+        print(f"[paper] FIRE {city} {resolution_date}  legs={len(placed)}  staked=${total_staked:.2f}")
+        return fire_id
+
     # ── Position closing ──────────────────────────────────────────────────────
 
     def close_partial(self, trade: dict, sell_pct: float, reason: str):
