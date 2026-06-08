@@ -63,41 +63,70 @@ def run_resolve_pass():
         print(f"[bot] settled {settled} leg(s) via Polymarket resolution")
 
 
+_VERBOSE = os.getenv("SHOTGUN_VERBOSE", "false").lower() == "true"
+
+
 def run_fire_pass():
     balance = db.get_balance()
     cap = SHOTGUN["portfolio_exposure_cap_pct"] * balance
     already = db.get_fired_city_days()
     cfg = _make_cfg()
     groups = discover_city_days(SHOTGUN["cities"], days_ahead=SHOTGUN["discovery_days_ahead"])
+    # Per-poll disposition: every reviewed city-day lands in exactly one bucket,
+    # so an empty-looking poll still explains itself. counts -> one summary line;
+    # SHOTGUN_VERBOSE=true also prints a line per city-day with its reason.
+    counts = {"fired": 0, "already-fired": 0, "out-of-window": 0,
+              "no-coords": 0, "no-edge": 0, "cap-skipped": 0, "error": 0}
+
+    def _disp(reason, city, rd, detail=""):
+        counts[reason] = counts.get(reason, 0) + 1
+        if _VERBOSE:
+            print(f"  [poll] {city:<14} {rd}  {reason}{('  ' + detail) if detail else ''}")
+
+    capped = False
     for (city, rd), buckets in groups.items():
         if (city, rd) in already:
+            _disp("already-fired", city, rd)
             continue
         if not in_fire_window(city, rd, SHOTGUN["fire_window_hours"]):
+            h = hours_to_close(city, rd)
+            _disp("out-of-window", city, rd, f"to_close={h:.1f}h" if h is not None else "")
             continue
-        if db.get_open_exposure() >= cap:
-            print(f"[bot] exposure cap hit (${db.get_open_exposure():.0f}/${cap:.0f}) — stop firing this poll")
-            break   # intentional: stop firing entirely once cap reached (accepts discovery-order bias)
+        if capped or db.get_open_exposure() >= cap:
+            capped = True   # once capped, every remaining in-window city-day is cap-skipped
+            _disp("cap-skipped", city, rd)
+            continue
         try:
             coords = _coords_for(city)
             if not coords:
-                print(f"[bot] no coords for {city} — skip")
+                _disp("no-coords", city, rd)
                 continue
-            bets, center_f, density = plan_fire(city, rd, buckets, cfg, coords, _ensemble_fetch)
+            bets, center_f, density, rejected = plan_fire(
+                city, rd, buckets, cfg, coords, _ensemble_fetch)
             if not bets:
+                _disp("no-edge", city, rd, f"reviewed={len(rejected)}_filtered")
                 continue
             lead = hours_to_close(city, rd) or 0.0
             fire_id = _executor.place_fire(
                 city=city, resolution_date=rd, lead_hours=lead,
                 center_f=center_f or 0.0, density_json=json.dumps(density or []),
-                budget_usd=SHOTGUN["budget_per_city_day"], bets=bets)
+                budget_usd=SHOTGUN["budget_per_city_day"], bets=bets,
+                shadow_candidates=rejected)
             if fire_id:
                 staked = sum(b["stake_usd"] for b in bets)
-                print(f"[bot] FIRED {city} {rd} — {len(bets)} legs @ {lead:.1f}h to close")
+                _disp("fired", city, rd, f"{len(bets)}_legs shadow={len(rejected)}")
+                print(f"[bot] FIRED {city} {rd} — {len(bets)} legs "
+                      f"({len(rejected)} shadow) @ {lead:.1f}h to close")
                 notify("info", "Shotgun Fire", f"{city} {rd}: {len(bets)} legs",
                        fields={"lead_h": f"{lead:.1f}", "staked": f"${staked:.2f}"})
         except Exception as e:
+            _disp("error", city, rd, str(e))
             print(f"[bot] fire failed for {city} {rd} (non-fatal): {e}")
             continue
+
+    nonzero = {k: v for k, v in counts.items() if v}
+    summary = ", ".join(f"{k} {v}" for k, v in nonzero.items()) or "nothing reviewed"
+    print(f"[bot] reviewed {len(groups)} city-days: {summary}")
 
 
 def _dry_run_report():
@@ -111,11 +140,14 @@ def _dry_run_report():
         win = in_fire_window(city, rd, SHOTGUN["fire_window_hours"])
         coords = _coords_for(city)
         n = 0
+        n_shadow = 0
         if win and coords:
-            bets, _, _ = plan_fire(city, rd, buckets, cfg, coords, _ensemble_fetch)
+            bets, _, _, rejected = plan_fire(city, rd, buckets, cfg, coords, _ensemble_fetch)
             n = len(bets)
+            n_shadow = len(rejected)
         h_str = f"{h:.1f}h" if h is not None else "n/a"
-        print(f"  [dry] {city:<14} {rd}  to_close={h_str}  in_window={win}  would_fire={n}_legs")
+        print(f"  [dry] {city:<14} {rd}  to_close={h_str}  in_window={win}  "
+              f"would_fire={n}_legs  shadow={n_shadow}")
 
 
 def run(dry_run: bool = False):
