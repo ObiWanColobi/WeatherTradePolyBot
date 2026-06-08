@@ -23,12 +23,16 @@ Run on the VPS via the snapshot_cleanup.timer (daily 02:00 UTC, after the 00:00
 rollup).
 """
 import argparse
+import os
 import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent.parent / "weather_bot.db"
+# Separate snapshot DB (see config.SNAPSHOT_DB_PATH). This script VACUUMs the
+# whole file — it MUST target the snapshot DB, never the paper-trading DB.
+DB_PATH = Path(os.environ.get(
+    "SNAPSHOT_DB_PATH", str(Path(__file__).parent.parent / "snapshots.db")))
 PARQUET_DIR = Path(__file__).parent.parent / "snapshot_parquet"
 
 SQLITE_RETENTION_DAYS = 3

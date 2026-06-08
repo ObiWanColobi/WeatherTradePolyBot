@@ -133,7 +133,7 @@ def process_event_dict(event: dict, snapshot_at_utc: str) -> Iterator[dict]:
 def insert_snapshot_rows(rows: list[dict]) -> int:
     if not rows:
         return 0
-    conn = db.get_conn()
+    conn = db.snapshot_conn()   # SEPARATE DB — never the paper-trading file
     cols = list(rows[0].keys())
     placeholders = ",".join("?" for _ in cols)
     sql = f"INSERT INTO bucket_snapshots ({','.join(cols)}) VALUES ({placeholders})"
@@ -155,7 +155,7 @@ def run_one_poll() -> int:
 
 def main() -> None:
     print("[snapshot] starting daemon loop")
-    db.init_db()
+    db.init_snapshot_db()   # bucket_snapshots lives in the SEPARATE snapshot DB
     consecutive_failures = 0
     while True:
         try:

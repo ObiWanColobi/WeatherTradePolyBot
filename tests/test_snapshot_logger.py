@@ -12,8 +12,10 @@ from snapshot_logger import fetch_active_weather_events, process_event_dict, run
 def use_memory_db(monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", ":memory:")
     monkeypatch.setattr(db, "_DB_PATH", ":memory:")
+    monkeypatch.setattr(db, "_SNAPSHOT_DB_PATH", ":memory:")
     monkeypatch.setattr(db, "_MEM_CONN", None)
     db.init_db()
+    db.init_snapshot_db()   # bucket_snapshots now lives in the (shared in-mem) snapshot DB
     yield
 
 

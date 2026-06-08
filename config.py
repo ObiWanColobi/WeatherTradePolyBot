@@ -49,6 +49,12 @@ MIN_HOURS_TO_CLOSE = 1
 # throwaway file instead of clobbering the production DB. No-op otherwise.
 DB_PATH = os.environ.get("DB_PATH_OVERRIDE", "weather_bot.db")
 
+# Shadow snapshot logger (VPS) writes to a SEPARATE file so its nightly VACUUM
+# (whole-DB exclusive lock + ~DB-size scratch space, on a 2GB/day file) can never
+# lock or risk the paper-trading DB. Local dev/tests never run the logger, so this
+# default is harmless off-VPS. Override on the VPS via SNAPSHOT_DB_PATH env.
+SNAPSHOT_DB_PATH = os.environ.get("SNAPSHOT_DB_PATH", "snapshots.db")
+
 # ── Legacy compatibility shim ────────────────────────────────────────────────
 # Many kept modules still `from config import WEATHER` and read tunables via
 # WEATHER.get("key", default). The shotgun strategy no longer uses the old
@@ -60,7 +66,10 @@ WEATHER: dict = {}
 # ── Shotgun strategy (v1) ────────────────────────────────────────────────────
 SHOTGUN = {
     "mode":                       "dist_yes_no",
-    "fire_window_hours":          12.0,
+    # Default 12h (validated window). Env-overridable for testing wider windows
+    # without a code edit — e.g. SHOTGUN_FIRE_WINDOW_HOURS=24 to dry-run more
+    # city-days. Leave unset in production.
+    "fire_window_hours":          float(os.getenv("SHOTGUN_FIRE_WINDOW_HOURS", "12.0")),
     "budget_per_city_day":        50.00,
     "edge_threshold":             0.12,
     "mass_core_frac":             0.50,

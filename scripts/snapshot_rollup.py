@@ -19,11 +19,15 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import os
+
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-DB_PATH = Path(__file__).parent.parent / "weather_bot.db"
+# Separate snapshot DB (see config.SNAPSHOT_DB_PATH) — same file the logger writes.
+DB_PATH = Path(os.environ.get(
+    "SNAPSHOT_DB_PATH", str(Path(__file__).parent.parent / "snapshots.db")))
 OUTPUT_DIR = Path(__file__).parent.parent / "snapshot_parquet"
 CHUNK_SIZE = 50_000
 
