@@ -36,6 +36,7 @@ def _make_cfg() -> ShotgunConfig:
         price_max=SHOTGUN["price_max"], vol_min=SHOTGUN["vol_min"],
         sizing_mode=SHOTGUN["sizing_mode"], budget_per_city_day=SHOTGUN["budget_per_city_day"],
         per_bucket_liq_cap_frac=SHOTGUN["per_bucket_liq_cap_frac"],
+        density_floor=SHOTGUN.get("density_floor", 0.01),
     )
 
 
@@ -57,10 +58,30 @@ def _coords_for(city: str):
     return CITY_COORDS.get(key)
 
 
+_STALE_LEG_MAX_AGE_H = float(os.getenv("SHOTGUN_STALE_LEG_HOURS", "72.0"))
+_stale_alerted: set[int] = set()   # fire_ids already alerted on, so we don't spam each poll
+
+
 def run_resolve_pass():
     settled = shotgun_resolver.settle_due_fires_polymarket(resolution_fetch=_resolution_fetch)
     if settled:
         print(f"[bot] settled {settled} leg(s) via Polymarket resolution")
+
+    # M5: surface fires whose markets never resolved — they pin the exposure cap.
+    # Alert once per fire (Discord + log) so the operator can void/clear them.
+    try:
+        stale = shotgun_resolver.check_stale_legs(max_age_hours=_STALE_LEG_MAX_AGE_H)
+        for f in stale:
+            if f["id"] in _stale_alerted:
+                continue
+            _stale_alerted.add(f["id"])
+            msg = (f"{f['city']} {f['resolution_date']} open {f['age_hours']:.0f}h "
+                   f"(>{_STALE_LEG_MAX_AGE_H:.0f}h) — market may be voided/unresolved")
+            print(f"[bot] STALE FIRE {msg}")
+            notify("warning", "Stale shotgun fire", msg,
+                   fields={"fire_id": str(f["id"]), "staked": f"${f.get('total_staked_usd', 0) or 0:.2f}"})
+    except Exception as e:
+        print(f"[bot] stale-leg check failed (non-fatal): {e}")
 
 
 _VERBOSE = os.getenv("SHOTGUN_VERBOSE", "false").lower() == "true"

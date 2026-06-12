@@ -45,16 +45,27 @@ def winset_density(
     density: Sequence[float],
 ) -> float:
     """Estimate P(snapshot's win set occurs) from the ladder's per-bucket density.
-    For closed ladder buckets, density is split uniformly across the bucket's integer-°F values.
-    For tail buckets, full bucket density is attributed (a single ladder tail covers many integers).
+
+    For closed ladder buckets, density is split uniformly across the bucket's integer-°F
+    values. For a market TAIL bucket, the win set is the market's own threshold (the
+    payload), NOT the ladder's tail edge — these differ whenever the market tail starts
+    at a different temperature than `center ± offset`. We therefore integrate the density
+    over exactly the integer °F values the payload threshold admits (H2 fix, 2026-06-11):
+    pricing the tail against the ladder's fixed tail mass produced phantom edge because
+    settlement (winset_resolved) already used the payload threshold.
+
+    tail_top payload T: win iff f >= T.   tail_bottom payload T: win iff f <= T.
+    The ladder's own open tail can't be subdivided by integer (unbounded), so its full
+    mass is attributed when the threshold reaches into it (a small, conservative-leaning
+    approximation; closed buckets in between are apportioned exactly).
     """
     kind, payload = winset
     if kind == "tail_bottom":
-        # ladder index 0 is the bottom tail (lo=None); use its full density
-        return float(density[0])
+        assert isinstance(payload, int)
+        return _tail_density(ladder, density, payload, top=False)
     if kind == "tail_top":
-        # ladder index len-1 is the top tail (hi=None)
-        return float(density[len(density) - 1])
+        assert isinstance(payload, int)
+        return _tail_density(ladder, density, payload, top=True)
     # closed
     assert isinstance(payload, list)
     # For each ladder bucket, count payload integers that fall in it
@@ -67,6 +78,51 @@ def winset_density(
         if width <= 0:
             continue
         n_in = sum(1 for f in payload if lo_i <= f <= hi_i)
+        if n_in:
+            total += float(density[i]) * (n_in / width)
+    return total
+
+
+def _tail_density(
+    ladder: Sequence[tuple[Optional[float], Optional[float]]],
+    density: Sequence[float],
+    threshold: int,
+    top: bool,
+) -> float:
+    """Density mass consistent with a market tail threshold.
+    top=True  -> win iff f >= threshold (tail_top).
+    top=False -> win iff f <= threshold (tail_bottom).
+    Closed ladder buckets are apportioned by the fraction of their integer °F values
+    that satisfy the threshold. An open ladder tail is unbounded, so it can't be
+    apportioned by integer — it contributes its FULL mass whenever its unbounded range
+    can satisfy the query (a top tail [lo,∞) always reaches above any threshold for a
+    f>=threshold query; a bottom tail (-∞,hi] always reaches below for a f<=threshold
+    query). A tail that points the wrong way only qualifies if its finite edge already
+    satisfies the threshold."""
+    total = 0.0
+    for i, (lo, hi) in enumerate(ladder):
+        if lo is None:                      # bottom open tail (-∞, hi]
+            hi_i = int(round(hi))
+            if not top:
+                total += float(density[i])  # unbounded below always reaches f <= threshold
+            elif hi_i >= threshold:
+                total += float(density[i])  # finite top edge already satisfies f >= threshold
+            continue
+        if hi is None:                      # top open tail [lo, ∞)
+            lo_i = int(round(lo))
+            if top:
+                total += float(density[i])  # unbounded above always reaches f >= threshold
+            elif lo_i <= threshold:
+                total += float(density[i])  # finite bottom edge already satisfies f <= threshold
+            continue
+        lo_i, hi_i = int(round(lo)), int(round(hi))
+        width = hi_i - lo_i + 1
+        if width <= 0:
+            continue
+        if top:
+            n_in = sum(1 for f in range(lo_i, hi_i + 1) if f >= threshold)
+        else:
+            n_in = sum(1 for f in range(lo_i, hi_i + 1) if f <= threshold)
         if n_in:
             total += float(density[i]) * (n_in / width)
     return total
@@ -107,6 +163,25 @@ def mass_core_indices(density: list[float], frac: float) -> set[int]:
     return chosen
 
 
+def _exec_prices(r: dict) -> tuple[float, float]:
+    """Executable per-share prices for (YES, NO) of a candidate row (H3 fix).
+
+    A taker BUYS at the touch, not the mid: YES pays best_ask, NO pays (1 - best_bid)
+    [NO-ask = 1 - YES-bid]. Scoring edge at the mid systematically over-states edge by
+    half the spread on each side — fatal on the thin longshot books this strategy
+    fires into. Falls back to the YES mid (NO: 1-mid) when the book wasn't captured,
+    so legacy rows / tests that pass only mid_price keep their old behavior.
+
+    Returns (yes_price, no_cost): the price YES would pay and the price NO would pay.
+    """
+    mid = r["mid_price"]
+    ba = r.get("best_ask")
+    bb = r.get("best_bid")
+    yes_price = float(ba) if ba is not None else float(mid)
+    no_cost = (1.0 - float(bb)) if bb is not None else (1.0 - float(mid))
+    return yes_price, no_cost
+
+
 def classify_rejections(
     rows: list[dict],
     density_vector: list[float],
@@ -135,13 +210,14 @@ def classify_rejections(
     for r in rows:
         idx = r["ladder_idx"]
         d = r["density"]
-        mid = r["mid_price"]
         in_core = bool(core is not None and idx in core)
 
-        yes_edge = d - mid
-        yes_price_ok = price_min <= mid <= price_max
-        no_cost = 1.0 - mid
-        no_edge = mid - d
+        # H3: score at the executable touch (best_ask for YES, 1-best_bid for NO),
+        # not the mid. yes_edge = d - ask; no_edge = (1-d) - (1-bid) = bid - d.
+        yes_price, no_cost = _exec_prices(r)
+        yes_edge = d - yes_price
+        yes_price_ok = price_min <= yes_price <= price_max
+        no_edge = (1.0 - d) - no_cost
         no_cost_ok = price_min <= no_cost <= price_max
 
         if mode == "edge_shotgun":
@@ -184,6 +260,10 @@ def _shadow_row(r: dict, side: str, edge: float, in_core: bool, reason: str) -> 
         would_side=side, skip_reason=reason,
         ladder_idx=r.get("ladder_idx"), density=r.get("density"),
         mid_price=r.get("mid_price"), edge=float(edge), in_core=int(in_core),
+        # M1: carry the book state so the lever analysis can price the would-side at
+        # an executable touch (YES best_ask / NO 1-best_bid), not the frictionless mid.
+        best_bid=r.get("best_bid"), best_ask=r.get("best_ask"),
+        liquidity_num=r.get("liquidity_num"),
         winset_kind=r.get("winset_kind"),
         winset_payload_json=r.get("winset_payload_json"),
     )
@@ -214,19 +294,19 @@ def build_bucket_bets(
     for r in rows:
         idx = r["ladder_idx"]
         d = r["density"]
-        mid = r["mid_price"]
+        # H3: score at the executable touch (YES best_ask / NO 1-best_bid), not mid.
+        yes_price, no_cost = _exec_prices(r)
         if mode == "edge_shotgun":
-            if (d - mid) >= edge_threshold and price_min <= mid <= price_max:
+            if (d - yes_price) >= edge_threshold and price_min <= yes_price <= price_max:
                 selected.append((r, "yes"))
         elif mode in ("dist_yes", "dist_yes_no"):
             in_core = idx in core
-            yes_ok = in_core and (d - mid) >= edge_threshold and price_min <= mid <= price_max
+            yes_ok = in_core and (d - yes_price) >= edge_threshold and price_min <= yes_price <= price_max
             if yes_ok:
                 selected.append((r, "yes"))
                 continue
             if mode == "dist_yes_no":
-                no_cost = 1.0 - mid
-                no_edge = (1.0 - d) - no_cost  # = mid - d
+                no_edge = (1.0 - d) - no_cost  # NO fair value (1-d) minus NO cost
                 if no_edge >= edge_threshold and price_min <= no_cost <= price_max:
                     selected.append((r, "no"))
         else:
@@ -250,10 +330,13 @@ def build_bucket_bets(
     bets: list[dict] = []
     for (r, side), w in zip(selected, weights):
         stake = budget_per_city_day if sizing == "flat" else budget * (w / wsum)
+        yes_price, no_cost = _exec_prices(r)
         bet = dict(r)
         bet["side"] = side
         bet["stake_usd"] = stake
-        if side == "no":
-            bet["edge"] = r["mid_price"] - r["density"]   # NO-side edge; YES edge was density - mid
+        # Store the touch-based edge actually realized at selection (H3): YES = d-ask,
+        # NO = (1-d)-no_cost. Mirrors the selection test above so the logged edge is
+        # the executable one, not the optimistic mid edge.
+        bet["edge"] = (r["density"] - yes_price) if side == "yes" else ((1.0 - r["density"]) - no_cost)
         bets.append(bet)
     return bets

@@ -118,6 +118,10 @@ def init_db():
                 stake_usd REAL,
                 fill_price REAL,
                 shares REAL,
+                fee_usd REAL,
+                best_bid REAL,
+                best_ask REAL,
+                liquidity_num REAL,
                 status TEXT DEFAULT 'open',
                 resolved_outcome TEXT,
                 pnl REAL,
@@ -150,6 +154,9 @@ def init_db():
                 mid_price REAL,
                 edge REAL,                  -- the would-side edge (yes: d-mid, no: mid-d)
                 in_core INTEGER,
+                best_bid REAL,              -- book state at decision time (M1) so the
+                best_ask REAL,              -- lever analysis can price at an executable
+                liquidity_num REAL,         -- touch, not the frictionless mid
                 status TEXT DEFAULT 'open',
                 resolved_outcome TEXT,      -- win | loss (had we taken would_side)
                 hypo_pnl REAL,              -- P&L of a $1 notional stake on would_side
@@ -541,6 +548,18 @@ def init_db():
             print(f"[db] WARNING: cannot create idx_trade_active_token — {e}")
             print("[db]          duplicate active token_id rows exist. "
                   "Clean the DB and restart to enable the guardrail.")
+
+        # 2026-06-12 review fixes (H1/M1). Book state + realized fee on shotgun legs
+        # so post-resolution forensics can reconstruct slippage; the same on shadow
+        # legs so the lever analysis prices at an executable touch, not frictionless
+        # mid. fee_usd is the Polymarket taker fee charged at fire time.
+        _safe_add_column(conn, "shotgun_bets", "fee_usd",       "REAL")
+        _safe_add_column(conn, "shotgun_bets", "best_bid",      "REAL")
+        _safe_add_column(conn, "shotgun_bets", "best_ask",      "REAL")
+        _safe_add_column(conn, "shotgun_bets", "liquidity_num", "REAL")
+        _safe_add_column(conn, "shotgun_shadow_bets", "best_bid",      "REAL")
+        _safe_add_column(conn, "shotgun_shadow_bets", "best_ask",      "REAL")
+        _safe_add_column(conn, "shotgun_shadow_bets", "liquidity_num", "REAL")
 
 
 def init_snapshot_db():

@@ -24,6 +24,11 @@ class ShotgunConfig:
     sizing_mode: str = "weighted"
     budget_per_city_day: float = 50.0
     per_bucket_liq_cap_frac: float = 0.10
+    # Clamp a bucket's forecast density to >= density_floor before edge is computed.
+    # Prevents a model-blind density=0 bucket from registering a free +(1-mid) NO
+    # edge (e.g. tel-aviv 31°C NO lost when 31°C actually happened — the model had
+    # assigned literal 0 to the realized outcome). See review (2026-06-11). 0 disables.
+    density_floor: float = 0.01
 
 
 def plan_fire(
@@ -72,6 +77,12 @@ def plan_fire(
         if ws is None:
             continue
         d = winset_density(ws, ladder, density)
+        # Probability floor: a winset the model assigns ~0 mass is exactly where the
+        # model is blindest, not a free NO edge. Clamp before edge is derived so a
+        # density-0 bucket can't masquerade as a high-confidence NO. (mass-core uses
+        # the unclamped density_vector below, so the forecast shape is untouched.)
+        if cfg.density_floor > 0.0:
+            d = max(d, cfg.density_floor)
         try:
             if ws[0] == "closed":
                 if not ws[1]:

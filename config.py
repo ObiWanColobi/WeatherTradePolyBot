@@ -79,6 +79,19 @@ SHOTGUN = {
     "sizing_mode":                "weighted",
     "per_bucket_liq_cap_frac":    0.10,
     "portfolio_exposure_cap_pct": 0.80,
+    # Execution-cost parity with the research harness (snapshot_pnl.simulate_fill_realistic).
+    # Paper fills now charge the same Polymarket taker fee + per-fill gas the backtest did,
+    # so paper P&L is directly comparable. See review H1 (2026-06-11).
+    "taker_fee_rate":             0.0125,   # Polymarket weather taker fee: shares*rate*p*(1-p)
+    "gas_per_fill_usd":           0.004,    # per-leg fixed cost taken off the top
+    # H3: emulate a limit order in paper — reject a leg if its book-walk fill price
+    # exceeds the scored price (best_ask for YES / 1-best_bid for NO) by more than this.
+    # None disables the cap. See review H3 (2026-06-11).
+    "max_fill_slippage_per_leg":  0.10,
+    # Probability floor: the forecast density assigned to a bucket is clamped to at
+    # least this before edge is computed, so a model-blind density=0 bucket can't look
+    # like a free +(1-mid) NO edge. See review density=0 anomaly (tel-aviv 31°C).
+    "density_floor":              0.01,
     "cities": [
         "toronto", "chicago", "denver", "dallas", "munich", "shanghai", "tel aviv",
         "istanbul", "hong kong", "moscow", "paris", "buenos aires", "beijing", "seoul",

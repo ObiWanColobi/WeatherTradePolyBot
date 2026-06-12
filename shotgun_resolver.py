@@ -69,6 +69,23 @@ def settle_leg_polymarket(bet: dict, resolution_fetch) -> bool:
     return True
 
 
+def _shadow_cost(shadow: dict) -> float:
+    """Executable per-share cost of the would-side of a shadow bet. YES buys at
+    best_ask; NO buys at (1 - best_bid). Falls back to the YES mid (NO: 1-mid) when
+    the book state wasn't captured (legacy rows). See M1 (2026-06-11 review)."""
+    side = shadow["would_side"]
+    bb = shadow.get("best_bid")
+    ba = shadow.get("best_ask")
+    if side == "yes":
+        if ba is not None:
+            return float(ba)
+        return float(shadow["mid_price"])
+    # NO
+    if bb is not None:
+        return 1.0 - float(bb)
+    return 1.0 - float(shadow["mid_price"])
+
+
 def settle_shadow_leg_polymarket(shadow: dict, resolution_fetch) -> bool:
     """Settle ONE open shadow (counterfactual) leg via Polymarket resolution.
     Records what would_side WOULD have earned on a $1 notional stake — credits
@@ -80,9 +97,11 @@ def settle_shadow_leg_polymarket(shadow: dict, resolution_fetch) -> bool:
         return False
     bucket_hit = res.get("yes_price") == 1.0
     won = bucket_hit if shadow["would_side"] == "yes" else (not bucket_hit)
-    # $1 notional: win pays (1/mid)*1 - 1 = (1-mid)/mid on YES; symmetric for NO
-    # via the NO cost (1-mid). Simpler/robust: P&L = payout - cost on $1 stake.
-    cost = float(shadow["mid_price"]) if shadow["would_side"] == "yes" else (1.0 - float(shadow["mid_price"]))
+    # $1 notional: win pays (1/cost)*1 - 1; loss = -1. (M1) Price the would-side at an
+    # EXECUTABLE touch when the book state was captured — YES pays best_ask, NO pays
+    # (1 - best_bid) — so the counterfactual isn't optimistically priced at the
+    # frictionless mid. Fall back to the mid-derived cost for legacy rows with no book.
+    cost = _shadow_cost(shadow)
     if cost <= 0.0:
         hypo_pnl = 0.0   # degenerate price — no meaningful counterfactual
     else:
@@ -120,9 +139,52 @@ def settle_due_fires_polymarket(resolution_fetch=None) -> int:
         still_open = [b for b in db.get_all_bets_for_fire(fire["id"]) if b["status"] == "open"]
         if not still_open:
             db.update_fire(fire["id"], dict(status="closed"))
+    # M2: a fire closes once its REAL legs resolve, but its shadow legs may still be
+    # open (their bucket resolved later, or they were never revisited after closure).
+    # Sweep every open shadow regardless of fire status so none orphan permanently.
+    settle_orphan_shadows(resolution_fetch)
     if settled:
         db.record_account_value()
     return settled
+
+
+def settle_orphan_shadows(resolution_fetch=None) -> int:
+    """Settle any open shadow bet whose fire has already closed (or which the
+    per-fire pass missed). Iterates get_open_shadow_bets() directly so a shadow can
+    never orphan once its bucket resolves. Returns # shadows settled."""
+    if resolution_fetch is None:
+        from markets.polymarket import get_resolution_status as resolution_fetch
+    n = 0
+    for shadow in db.get_open_shadow_bets():
+        try:
+            if settle_shadow_leg_polymarket(shadow, resolution_fetch):
+                n += 1
+        except Exception as e:
+            print(f"[resolve] orphan shadow settle failed id={shadow.get('id')}: {e}")
+    return n
+
+
+def check_stale_legs(max_age_hours: float = 72.0, now=None) -> list[dict]:
+    """Return open fires whose age exceeds max_age_hours — their bucket markets never
+    resolved (voided market, UMA dispute, or a settle path that never fired). Such legs
+    pin the exposure cap forever, so the operator needs to see them. (M5, 2026-06-11.)
+
+    A fire normally resolves within ~12-24h of close; >72h open is anomalous. Returns
+    the list of stale fire dicts (with added `age_hours`); the caller alerts/logs."""
+    from datetime import datetime, timezone
+    now = now or datetime.now(timezone.utc)
+    stale = []
+    for fire in db.get_open_fires():
+        try:
+            fired = datetime.fromisoformat(fire["fired_at_utc"].replace("Z", "+00:00"))
+            if fired.tzinfo is None:
+                fired = fired.replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+        age_h = (now - fired).total_seconds() / 3600.0
+        if age_h > max_age_hours:
+            stale.append({**fire, "age_hours": age_h})
+    return stale
 
 
 def live_truth(city: str, resolution_date: str) -> float | None:

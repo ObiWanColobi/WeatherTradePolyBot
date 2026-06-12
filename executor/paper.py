@@ -1,9 +1,10 @@
+import json
 from datetime import datetime, timezone
 from executor.base import BaseExecutor
 from notifications import notify, COLOR_GREEN
 import markets.polymarket as polymarket
 import db
-from config import WEATHER
+from config import WEATHER, SHOTGUN
 
 
 class PaperExecutor(BaseExecutor):
@@ -256,16 +257,48 @@ class PaperExecutor(BaseExecutor):
         Recorded as counterfactual rows linked to this fire — they place NOTHING
         (no fill, no balance effect), only freeze the density/edge/price the
         strategy saw so the levers can be evaluated post-resolution."""
+        fee_rate = WEATHER.get("taker_fee_rate", SHOTGUN.get("taker_fee_rate", 0.0125))
+        gas_per_fill = WEATHER.get("gas_per_fill_usd", SHOTGUN.get("gas_per_fill_usd", 0.004))
+        max_slip = SHOTGUN.get("max_fill_slippage_per_leg", None)
+
+        # M3: never stake more than the available cash. Track remaining cash as legs
+        # fill so a fire can't drive the balance negative (the old path debited the
+        # full total at the end with no per-leg or pre-flight cash check).
+        remaining_cash = db.get_balance()
+
         placed = []
         for b in bets:
             token_id = b.get("token_id") if b["side"] == "yes" else (b.get("no_token_id") or b.get("token_id"))
             if not token_id or b["stake_usd"] <= 0:
                 continue
+            if b["stake_usd"] > remaining_cash:
+                print(f"[paper] FIRE skip leg {b.get('group_item_title','')} — "
+                      f"insufficient cash ${remaining_cash:.2f} < ${b['stake_usd']:.2f}")
+                continue
             fill_price, filled_usdc = self._simulate_fill(token_id, "BUY", b["stake_usd"])
             if filled_usdc <= 0 or fill_price <= 0:
                 continue
-            shares = filled_usdc / fill_price
-            placed.append({**b, "fill_price": fill_price, "stake_usd": filled_usdc, "shares": shares})
+            # H3: emulate a limit order. The leg was scored at the touch price for the
+            # side we buy (YES: best_ask; NO: 1-best_bid). If the book-walk fill price
+            # is more than max_slip worse than that scored price, a limit order at the
+            # scored price would NOT have filled — so drop the leg instead of paying
+            # through the book. None disables the cap (legacy market-order behavior).
+            if max_slip is not None:
+                scored = self._scored_price(b)
+                if scored is not None and fill_price > scored + max_slip:
+                    print(f"[paper] FIRE skip leg {b.get('group_item_title','')} {b['side']} — "
+                          f"fill {fill_price:.3f} > scored {scored:.3f}+{max_slip:.2f} (limit miss)")
+                    continue
+            # H1: charge the Polymarket taker fee + per-fill gas the backtest charged,
+            # folded into cost so settle math (win=shares*1-stake, loss=-stake) stays
+            # correct. gas off the top, then taker fee shares*rate*p*(1-p) reduces shares.
+            shares, fee_usd = self._net_shares(fill_price, filled_usdc, fee_rate, gas_per_fill)
+            if shares <= 0:
+                print(f"[paper] FIRE skip leg {b.get('group_item_title','')} — uneconomic after fee/gas")
+                continue
+            remaining_cash -= filled_usdc
+            placed.append({**b, "fill_price": fill_price, "stake_usd": filled_usdc,
+                           "shares": shares, "fee_usd": fee_usd})
 
         if not placed:
             return 0
@@ -277,17 +310,28 @@ class PaperExecutor(BaseExecutor):
             density_json=density_json, budget_usd=budget_usd, total_staked_usd=total_staked,
             n_legs=len(placed), status="open"))
 
+        fired_at = datetime.now(timezone.utc).isoformat()
         for p in placed:
+            # Freeze the book state we saw at fire time so post-resolution forensics
+            # can reconstruct slippage/edge per leg (was always "[]" before — book
+            # forensics were impossible). One snapshot now; later polls may append.
+            traj = [dict(
+                at=fired_at, best_bid=p.get("best_bid"), best_ask=p.get("best_ask"),
+                scored_price=self._scored_price(p), mid_price=p.get("mid_price"),
+                fill_price=p["fill_price"], fee_usd=p.get("fee_usd"),
+                liquidity_num=p.get("liquidity_num"))]
             db.insert_bet(dict(
                 fire_id=fire_id, market_id=p.get("market_id"),
                 sub_market_condition_id=p.get("sub_market_condition_id"),
                 group_item_title=p.get("group_item_title"), side=p["side"],
                 ladder_idx=p.get("ladder_idx"), density=p.get("density"),
                 mid_price=p.get("mid_price"), edge=p.get("edge"), stake_usd=p["stake_usd"],
-                fill_price=p["fill_price"], shares=p["shares"], status="open",
+                fill_price=p["fill_price"], shares=p["shares"], fee_usd=p.get("fee_usd"),
+                best_bid=p.get("best_bid"), best_ask=p.get("best_ask"),
+                liquidity_num=p.get("liquidity_num"), status="open",
                 resolved_outcome=None, pnl=None,
                 winset_kind=p.get("winset_kind"), winset_payload_json=p.get("winset_payload_json"),
-                price_trajectory_json="[]"))
+                price_trajectory_json=json.dumps(traj)))
 
         # Counterfactual log — never placed, never debited. Frozen at decision
         # time so a later lever analysis settles them against the same market.
@@ -299,7 +343,9 @@ class PaperExecutor(BaseExecutor):
                 would_side=s.get("would_side"), skip_reason=s.get("skip_reason"),
                 ladder_idx=s.get("ladder_idx"), density=s.get("density"),
                 mid_price=s.get("mid_price"), edge=s.get("edge"),
-                in_core=s.get("in_core"), status="open",
+                in_core=s.get("in_core"),
+                best_bid=s.get("best_bid"), best_ask=s.get("best_ask"),
+                liquidity_num=s.get("liquidity_num"), status="open",
                 resolved_outcome=None, hypo_pnl=None,
                 winset_kind=s.get("winset_kind"),
                 winset_payload_json=s.get("winset_payload_json")))
@@ -500,6 +546,42 @@ class PaperExecutor(BaseExecutor):
                 direction = trade.get("direction", "YES").upper()
                 return yes_price if direction == "YES" else (1.0 - yes_price)
         return None
+
+    # ── Fill cost model (parity with research_db/snapshot_pnl) ────────────────
+
+    @staticmethod
+    def _scored_price(bet: dict) -> float | None:
+        """The touch price for the side we actually buy — what a limit order would
+        rest at. YES buys at best_ask; NO buys at (1 - best_bid). Falls back to the
+        stored YES mid (NO: 1-mid) when the book wasn't captured. None if unknown."""
+        side = bet["side"]
+        bb, ba = bet.get("best_bid"), bet.get("best_ask")
+        if side == "yes":
+            if ba is not None:
+                return float(ba)
+            mid = bet.get("mid_price")
+            return float(mid) if mid is not None else None
+        # NO: NO-ask = 1 - YES-bid
+        if bb is not None:
+            return 1.0 - float(bb)
+        mid = bet.get("mid_price")
+        return (1.0 - float(mid)) if mid is not None else None
+
+    @staticmethod
+    def _net_shares(fill_price: float, stake_usd: float, fee_rate: float,
+                    gas_per_fill: float) -> tuple[float, float]:
+        """Shares actually acquired after Polymarket taker fee + per-fill gas, and the
+        fee paid. Mirrors snapshot_pnl.simulate_fill_realistic so paper P&L matches the
+        backtest: gas off the top, then taker fee = shares_gross*rate*p*(1-p) reduces
+        shares. Both costs stay inside stake so settle (win=shares*1-stake) is correct."""
+        gross_invested = stake_usd - gas_per_fill
+        if fill_price <= 0.0 or gross_invested <= 0.0:
+            return 0.0, 0.0
+        shares_gross = gross_invested / fill_price
+        p = fill_price
+        fee_usd = shares_gross * fee_rate * p * (1.0 - p)
+        shares = (gross_invested - fee_usd) / fill_price
+        return (shares if shares > 0 else 0.0), fee_usd
 
     # ── Fill simulator ────────────────────────────────────────────────────────
 

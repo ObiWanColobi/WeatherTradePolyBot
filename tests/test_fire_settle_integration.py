@@ -49,15 +49,23 @@ def test_fire_then_settle_end_to_end(monkeypatch):
     bal_before_settle = db.get_balance()
     n = shotgun_resolver.settle_due_fires_polymarket(resolution_fetch=fake_resolution)
     assert n == 2
-    # winner: 10 USDC bought at 0.20 -> 50 shares -> pays $50. loser: $0.
+    # H1: shares are net of the Polymarket taker fee + $0.004 gas the backtest charges,
+    # so the winner pays slightly less than the frictionless $50. Compute expected
+    # shares the same way place_fire does (gas off the top, then taker fee).
+    fee_rate, gas, fill = 0.0125, 0.004, 0.20
+    gross = 10.0 - gas
+    shares_gross = gross / fill
+    fee_usd = shares_gross * fee_rate * fill * (1.0 - fill)
+    win_shares = (gross - fee_usd) / fill
+    win_proceeds = win_shares * 1.0
     legs = {b["sub_market_condition_id"]: b for b in db.get_all_bets_for_fire(fire_id)}
     assert legs["cond_win"]["resolved_outcome"] == "win"
-    assert abs(legs["cond_win"]["pnl"] - (50.0 - 10.0)) < 1e-6
+    assert abs(legs["cond_win"]["pnl"] - (win_proceeds - 10.0)) < 1e-6
     assert legs["cond_lose"]["resolved_outcome"] == "loss"
     assert abs(legs["cond_lose"]["pnl"] - (-10.0)) < 1e-6
-    # balance credited by winner proceeds ($50)
-    assert abs(db.get_balance() - (bal_before_settle + 50.0)) < 1e-6
+    # balance credited by winner proceeds (net of fee/gas)
+    assert abs(db.get_balance() - (bal_before_settle + win_proceeds)) < 1e-6
     # fire closed (all legs settled)
     assert db.get_open_fires() == []
-    # net over full cycle: started 2000, -20 fire, +50 winner = 2030
-    assert abs(db.get_balance() - 2030.0) < 1e-6
+    # net over full cycle: started 2000, -20 fire, +win_proceeds
+    assert abs(db.get_balance() - (2000.0 - 20.0 + win_proceeds)) < 1e-6

@@ -156,6 +156,32 @@ def fetch_weather_event(city_slug: str, date, kind: str = "highest") -> dict | N
     return body
 
 
+# Grace after a city-day's local close during which we still surface the event —
+# covers UMA resolution lag so a just-closed market isn't dropped before it settles.
+_PAST_CLOSE_GRACE_HOURS = 6.0
+
+
+def _event_is_past_close(event: dict, now, now_iso: str) -> bool:
+    """True iff the event's city-day has closed (so the bot should skip it).
+
+    Anchor on the CITY-LOCAL end-of-day derived from the event slug, NOT the
+    noon-UTC `endDate` Polymarket stamps (which is wrong for non-UTC cities — see
+    iter_weather_events docstring). Falls back to the raw endDate string compare
+    when the slug or tz can't be resolved."""
+    from datetime import timedelta
+    from snapshot_parse import parse_event_slug
+    from shotgun.fire_window import _close_utc
+
+    parsed = parse_event_slug(event.get("slug", "") or "")
+    if parsed:
+        close = _close_utc(parsed["city"], parsed["resolution_date"])
+        if close is not None:
+            return now > close + timedelta(hours=_PAST_CLOSE_GRACE_HOURS)
+    # Fallback: original behavior when we can't resolve a city-local close.
+    event_end = event.get("endDate") or ""
+    return bool(event_end and event_end < now_iso)
+
+
 def iter_weather_events(
     cities: list[str],
     *,
@@ -171,12 +197,18 @@ def iter_weather_events(
     _EVENT_CACHE_TTL_SEC). Cold-pass cost:
     ~len(cities) * (days_ahead + 1) * len(kinds) requests.
 
-    Past-close events are filtered out: Polymarket leaves them
-    `acceptingOrders=True` through UMA resolution but the bot can't enter
-    them (entry_min_hours_to_close gate) and many have dead CLOB books.
+    Past-close events are filtered out, but the close anchor is the CITY-LOCAL
+    end-of-day, NOT Polymarket's `endDate` stamp. Polymarket stamps `endDate` at
+    noon UTC on the resolution date — which for a city west of UTC falls *hours
+    before* that city-day's actual close (e.g. toronto's noon-UTC endDate is ~4h
+    before its 12h fire window even opens, so the old `endDate < now` filter dropped
+    every Americas city-day right when it became tradeable). We instead skip an event
+    only once its real city-local close (+ grace for UMA lag) is in the past. Falls
+    back to the raw endDate comparison when the slug/tz is unknown. (2026-06-12 fix.)
     """
     today = datetime.now(timezone.utc).date()
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
     for city in cities:
         cslug = _city_to_slug(city)
         for delta in range(days_ahead + 1):
@@ -187,8 +219,7 @@ def iter_weather_events(
                     if request_delay_sec > 0:
                         _time.sleep(request_delay_sec)
                     continue
-                event_end = event.get("endDate") or ""
-                if event_end and event_end < now_iso:
+                if _event_is_past_close(event, now, now_iso):
                     if request_delay_sec > 0:
                         _time.sleep(request_delay_sec)
                     continue
