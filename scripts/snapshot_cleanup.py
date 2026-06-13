@@ -1,9 +1,17 @@
 """Two-stage cleanup to bound disk usage on the VPS:
 
 1. SQLite rows older than 3 UTC days: delete (per-day, committing between days)
-   + VACUUM. We keep the last 3 days for the nightly rollup / live queries. (Was
-   7 days until 2026-06-05; the VPS logs ~2 GB/day, so 7-day retention let the DB
-   reach ~14 GB before the first prune — past the 20 GB disk wall.)
+   then compact via VACUUM INTO + atomic swap. We keep the last 3 days for the
+   nightly rollup / live queries. (Was 7 days until 2026-06-05; the VPS logs
+   ~2 GB/day, so 7-day retention let the DB reach ~14 GB before the first prune —
+   past the 20 GB disk wall.)
+
+   2026-06-13: switched the reclaim step from in-place `VACUUM` to `VACUUM INTO`
+   + swap. In-place VACUUM needs ~2× the DB size in scratch (original + rebuilt
+   copy + journal at once) — ~13 GB for a 6.4 GB DB — which the 20 GB box cannot
+   fit, so it failed every night with "database or disk is full (13)" while the
+   DELETE half kept working. VACUUM INTO writes one compacted copy (~1× scratch),
+   which fits; we integrity-check it and os.replace() it over the original.
 2. VPS parquet files >21 days old: delete (the VPS is a rolling buffer; the
    local archive is the permanent system of record).
 
@@ -80,19 +88,72 @@ def cleanup_sqlite(dry_run: bool) -> int:
             conn.execute(
                 "DELETE FROM bucket_snapshots WHERE substr(snapshot_at_utc,1,10) = ?", [day]
             )
+    conn.close()
 
     # DELETE alone leaves freed pages in the file (the file never shrinks), so the
-    # DB grows unbounded toward the disk ceiling even with daily pruning. VACUUM
-    # returns those pages to the OS. With 3-day retention the live DB stays ~6 GB
-    # (the VPS logs ~2 GB/day), so VACUUM's scratch requirement (~final DB size) is
-    # manageable — unlike vacuuming a runaway 15 GB file, which needs 15 GB of free
-    # disk it doesn't have. (Retention was 7 days until 2026-06-05; that let the DB
-    # reach ~14 GB before the first prune, past the 20 GB disk wall.)
+    # DB grows unbounded toward the disk ceiling even with daily pruning. We must
+    # return those pages to the OS — but NOT via in-place `VACUUM`: that holds the
+    # original file + the full rebuilt copy + journal simultaneously (~2× the DB
+    # size in scratch), which on 2026-06-13 failed every night with "database or
+    # disk is full (13)" — a 6.4 GB DB needs ~13 GB free and the 20 GB box doesn't
+    # have it. `VACUUM INTO` writes one compacted copy (~1× scratch) which fits, then
+    # we atomically swap it in. On any failure the original is left untouched.
     if n_before:
-        conn.execute("VACUUM")
-    conn.close()
-    print(f"[cleanup] deleted {n_before} SQLite rows on/before {cutoff_date} (VACUUM run)")
+        _compact_and_swap()
+    print(f"[cleanup] deleted {n_before} SQLite rows on/before {cutoff_date} (compacted)")
     return n_before
+
+
+def _compact_and_swap() -> None:
+    """Reclaim freed pages by writing a compacted copy via VACUUM INTO and atomically
+    swapping it over the live DB. Uses ~1× the DB size in scratch (vs ~2× for in-place
+    VACUUM), so it fits on the disk-constrained VPS. Verifies integrity before the swap;
+    leaves the original DB untouched on any error. See project_2026-06-13 disk-fill."""
+    tmp = DB_PATH.with_name(DB_PATH.name + ".compact")
+    # A stale temp from a crashed prior run would make VACUUM INTO fail (it refuses to
+    # overwrite). Clear it first.
+    if tmp.exists():
+        tmp.unlink()
+    try:
+        src = sqlite3.connect(str(DB_PATH))
+        try:
+            # VACUUM INTO needs a literal path; quote-escape defensively.
+            src.execute(f"VACUUM INTO '{str(tmp)}'")
+        finally:
+            src.close()
+
+        # Verify the compacted copy before trusting it: integrity_check must be 'ok'
+        # and the row count must match the source (guards a truncated/corrupt copy).
+        chk = sqlite3.connect(str(tmp))
+        try:
+            integrity = chk.execute("PRAGMA integrity_check").fetchone()[0]
+            n_compact = chk.execute("SELECT COUNT(*) FROM bucket_snapshots").fetchone()[0]
+        finally:
+            chk.close()
+        src2 = sqlite3.connect(str(DB_PATH))
+        try:
+            n_src = src2.execute("SELECT COUNT(*) FROM bucket_snapshots").fetchone()[0]
+        finally:
+            src2.close()
+        if integrity != "ok" or n_compact != n_src:
+            raise RuntimeError(
+                f"compacted copy rejected (integrity={integrity!r}, "
+                f"rows {n_compact} vs source {n_src}) — keeping original")
+
+        # Atomic on POSIX when src/dst share a filesystem (they do — same dir): the
+        # canonical path is never left pointing at a half-written file.
+        os.replace(str(tmp), str(DB_PATH))
+        print(f"[cleanup] compacted {DB_PATH.name} ({n_compact} rows) via VACUUM INTO + swap")
+    except Exception as e:
+        # Never let a failed compaction take down the prune or corrupt the DB. The
+        # DELETE already committed (retention is enforced); the file just won't shrink
+        # this run — surface loudly and retry next night.
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        print(f"[cleanup] WARNING: compaction failed, original DB intact: {e}")
 
 
 def cleanup_vps_parquet(dry_run: bool) -> int:
