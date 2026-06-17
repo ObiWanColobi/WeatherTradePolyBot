@@ -95,6 +95,64 @@ def test_compaction_failure_leaves_original_intact(tmp_path, monkeypatch):
     assert not (db.with_name(db.name + ".compact")).exists()
 
 
+def test_compaction_tolerates_concurrent_inserts_during_vacuum(tmp_path, monkeypatch):
+    """The live snapshot_logger keeps INSERTing while VACUUM INTO runs (it takes
+    minutes on the real DB). VACUUM INTO snapshots the source at its start, so the
+    compacted copy legitimately has fewer rows than the source counted afterwards.
+    The swap must still happen — a small shortfall from concurrent inserts is NOT
+    corruption. (Regression for 2026-06-14..16: exact-equality check rejected three
+    nights of good compactions, leaving the file un-shrunk.)"""
+    db = tmp_path / "snapshots.db"
+    _make_bloated_db(db, keep_days=["2026-06-13"], drop_days=["2026-06-10"])
+    size_before = db.stat().st_size
+    rows_before = _count(db)
+
+    cleanup = _load_cleanup(db, monkeypatch)
+
+    # Simulate the logger inserting a burst of rows after VACUUM INTO has written its
+    # point-in-time copy but before the source is re-counted: the copy is short by
+    # `burst` rows relative to the source, exactly like the live race. The source-count
+    # connection is the LAST one opened (after src for VACUUM INTO and chk for the
+    # copy), so we fire the burst just before that 3rd connection is handed back.
+    burst = 25
+    _patch_connect_to_inject_burst(cleanup, db, monkeypatch, before_connect_index=3, n_rows=burst)
+    cleanup._compact_and_swap()   # must swap despite the count mismatch
+
+    # The swap happened: file shrank and the post-VACUUM concurrent inserts survive
+    # (they were committed to the original, which we keep if compaction is rejected;
+    # but here compaction must be ACCEPTED, so the swapped-in copy lacks the burst —
+    # what matters is the file compacted and stayed integrity-ok with the snapshot data).
+    assert db.stat().st_size < size_before
+    assert _count(db) >= rows_before        # snapshot rows preserved (burst may or may not be in copy)
+    assert sqlite3.connect(str(db)).execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert not (db.with_name(db.name + ".compact")).exists()
+
+
+def test_compaction_rejects_gross_row_shortfall(tmp_path, monkeypatch):
+    """A truncated/corrupt copy (missing a large fraction of rows) must STILL be
+    rejected — the tolerance only forgives a small concurrent-insert shortfall, not
+    real data loss. Original DB left intact."""
+    db = tmp_path / "snapshots.db"
+    _make_bloated_db(db, keep_days=["2026-06-13"], drop_days=["2026-06-10"], rows_per_day=2000)
+
+    cleanup = _load_cleanup(db, monkeypatch)
+
+    # Balloon the source past the absolute tolerance floor right before the
+    # source-count connection, so the compacted copy is short by far more than the
+    # tolerance allows -> reject. (Larger than COMPACT_ROW_TOLERANCE = 50k.)
+    gross = cleanup.COMPACT_ROW_TOLERANCE + 10_000
+    _patch_connect_to_inject_burst(
+        cleanup, db, monkeypatch, before_connect_index=3, n_rows=gross)
+    cleanup._compact_and_swap()   # must NOT swap — shortfall is gross
+
+    # Swap was rejected: the original (which received the gross burst) is still in
+    # place, so its rows include the burst. A wrongful swap would have replaced it with
+    # the point-in-time copy that LACKS the burst — that's the regression we're guarding.
+    assert _count(db) >= gross
+    assert not (db.with_name(db.name + ".compact")).exists()
+    assert sqlite3.connect(str(db)).execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
 def test_full_cleanup_sqlite_prunes_and_compacts(tmp_path, monkeypatch):
     db = tmp_path / "snapshots.db"
     # old day present + recent day present; cleanup should delete old + shrink
@@ -124,6 +182,30 @@ def _count(db: Path) -> int:
         return c.execute("SELECT COUNT(*) FROM bucket_snapshots").fetchone()[0]
     finally:
         c.close()
+
+
+def _patch_connect_to_inject_burst(cleanup, db, monkeypatch, before_connect_index, n_rows):
+    """Wrap cleanup.sqlite3.connect so that, just before the Nth connection is handed
+    back, a burst of rows is committed to the live DB on a side connection. Used to
+    simulate the snapshot_logger writing concurrently while VACUUM INTO runs: the
+    point-in-time compacted copy ends up short by `n_rows` vs the source counted after."""
+    real_connect = cleanup.sqlite3.connect
+    state = {"n": 0}
+
+    def wrapped(path, *a, **k):
+        state["n"] += 1
+        if state["n"] == before_connect_index:
+            side = real_connect(str(db))
+            try:
+                side.executemany(
+                    "INSERT INTO bucket_snapshots (snapshot_at_utc, payload) VALUES (?, ?)",
+                    [("2026-06-13T18:00:00", "y" * 400) for _ in range(n_rows)])
+                side.commit()
+            finally:
+                side.close()
+        return real_connect(path, *a, **k)
+
+    monkeypatch.setattr(cleanup.sqlite3, "connect", wrapped)
 
 
 def _failing_connect(sqlite_mod, db_path_str):

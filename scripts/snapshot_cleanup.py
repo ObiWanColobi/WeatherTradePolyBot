@@ -45,6 +45,14 @@ PARQUET_DIR = Path(__file__).parent.parent / "snapshot_parquet"
 
 SQLITE_RETENTION_DAYS = 3
 PARQUET_RETENTION_DAYS = 21
+# Compaction accepts a small row shortfall in the VACUUM INTO copy vs the source
+# (rows the live logger INSERTed during the multi-minute copy — see _compact_and_swap).
+# Accept up to max(absolute floor, fraction of source); reject a gross shortfall as a
+# truncated/corrupt copy. The live VPS inserts ~1.5k rows during the ~5-min compaction,
+# so a 50k / 2% ceiling forgives the race with vast margin while still catching real
+# data loss (which would be off by hundreds of thousands).
+COMPACT_ROW_TOLERANCE = 50_000
+COMPACT_ROW_TOLERANCE_FRAC = 0.02
 # Safety floor: refuse to prune parquets if doing so would leave fewer than this
 # many files. A date-parse or system-clock bug must not be able to wipe the buffer.
 PARQUET_MIN_KEEP_FILES = 7
@@ -123,7 +131,17 @@ def _compact_and_swap() -> None:
             src.close()
 
         # Verify the compacted copy before trusting it: integrity_check must be 'ok'
-        # and the row count must match the source (guards a truncated/corrupt copy).
+        # and the copy must hold essentially all the source's rows (guards a
+        # truncated/corrupt copy). We do NOT require an *exact* count match: the live
+        # snapshot_logger keeps INSERTing during the multi-minute VACUUM INTO, and
+        # VACUUM INTO takes a point-in-time snapshot at its *start*, so the copy
+        # legitimately has a few fewer rows than the source we count afterwards. The
+        # exact-equality check used until 2026-06-17 treated those normal concurrent
+        # inserts as corruption and rejected good compactions three nights running
+        # (e.g. "rows 956967 vs source 958507"), leaving the file un-shrunk. So accept
+        # a small shortfall (copy older than source by up to a poll-burst); reject a
+        # gross shortfall (real truncation) or a copy LARGER than the source (impossible
+        # for a point-in-time snapshot — signals something wrong).
         chk = sqlite3.connect(str(tmp))
         try:
             integrity = chk.execute("PRAGMA integrity_check").fetchone()[0]
@@ -135,10 +153,13 @@ def _compact_and_swap() -> None:
             n_src = src2.execute("SELECT COUNT(*) FROM bucket_snapshots").fetchone()[0]
         finally:
             src2.close()
-        if integrity != "ok" or n_compact != n_src:
+        shortfall = n_src - n_compact
+        tolerance = max(COMPACT_ROW_TOLERANCE, int(n_src * COMPACT_ROW_TOLERANCE_FRAC))
+        if integrity != "ok" or shortfall < 0 or shortfall > tolerance:
             raise RuntimeError(
-                f"compacted copy rejected (integrity={integrity!r}, "
-                f"rows {n_compact} vs source {n_src}) — keeping original")
+                f"compacted copy rejected (integrity={integrity!r}, rows {n_compact} "
+                f"vs source {n_src}, shortfall {shortfall} > tolerance {tolerance}) "
+                f"— keeping original")
 
         # Atomic on POSIX when src/dst share a filesystem (they do — same dir): the
         # canonical path is never left pointing at a half-written file.
