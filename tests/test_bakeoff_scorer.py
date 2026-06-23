@@ -31,3 +31,29 @@ def test_score_city_majority_and_roi():
     assert out["n_cities"] == 2
     # nyc +ROI, dal -ROI -> majority NOT positive (1 of 2)
     assert out["city_majority_positive"] is False
+
+def test_make_trade_uses_filled_shares_not_wanted():
+    import sys as _sys
+    from pathlib import Path as _P
+    _sys.path.insert(0, str(_P(__file__).parent.parent))
+    from bakeoff.harness.scorer import make_trade
+    # cost result where only 100 of 200 wanted shares filled
+    cost_result = {"filled_shares": 100.0, "net_cost_usd": 50.004, "unfilled_shares": 100.0,
+                   "avg_price": 0.50, "fee_usd": 0.0, "gas_usd": 0.004}
+    t = make_trade("nyc", "2026-06-01", ("closed", [70]), "buy", "opt", cost_result)
+    assert t["shares"] == pytest.approx(100.0)        # filled, NOT 200 wanted
+    assert t["net_cost_usd"] == pytest.approx(50.004)
+
+def test_cluster_bootstrap_is_deterministic_and_runs():
+    trades = [
+        {"city":"nyc","resolution_date":"2026-06-01","winset":("closed",[70]),"side":"buy",
+         "shares":10.0,"net_cost_usd":5.0,"fee_regime":"opt"},
+        {"city":"nyc","resolution_date":"2026-06-01","winset":("closed",[71]),"side":"buy",
+         "shares":10.0,"net_cost_usd":5.0,"fee_regime":"opt"},
+        {"city":"dal","resolution_date":"2026-06-02","winset":("closed",[70]),"side":"buy",
+         "shares":10.0,"net_cost_usd":5.0,"fee_regime":"opt"},
+    ]
+    truth = {("nyc","2026-06-01"):70.0, ("dal","2026-06-02"):80.0}
+    out1 = score(trades, truth)
+    out2 = score(trades, truth)
+    assert out1["bootstrap_ci_low"] == out2["bootstrap_ci_low"]  # deterministic (seed)

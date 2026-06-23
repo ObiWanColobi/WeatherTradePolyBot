@@ -9,6 +9,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from shotgun.bets import winset_resolved  # pure import
 
 
+def make_trade(city, resolution_date, winset, side, fee_regime, cost_result):
+    """Build a Trade dict from a cost_model.cost_fill() result.
+
+    Guarantees shares == filled_shares and net_cost_usd come from the SAME fill, so a
+    candidate can never be paid out on shares it could not fill. Candidates MUST build
+    trades through this, not by hand.
+    """
+    return {
+        "city": city,
+        "resolution_date": resolution_date,
+        "winset": winset,
+        "side": side,
+        "fee_regime": fee_regime,
+        "shares": cost_result["filled_shares"],
+        "net_cost_usd": cost_result["net_cost_usd"],
+    }
+
+
 def settle_trade(trade: dict, truth_f) -> dict:
     out = dict(trade)
     if truth_f is None:
@@ -51,16 +69,25 @@ def score(trades: list[dict], truth_by_key: dict) -> dict:
     n_pos = sum(1 for v in per_city_roi.values() if v > 0)
     majority = n_pos > (len(per_city_roi) / 2.0)
 
-    # Bootstrap CI on ROI (1000 resamples, 5th pct). Deterministic seed.
+    # Bootstrap CI on ROI, CLUSTERED by city-day (legs within a city-day are correlated:
+    # they share one daily-max truth and resolve as a block). Resampling individual trades
+    # would understate the CI width and over-optimistically pass the win bar. Deterministic seed.
     rng = np.random.default_rng(12345)
-    pnls = np.array([s["pnl_usd"] for s in settled])
-    costs = np.array([s["net_cost_usd"] for s in settled])
-    n = len(settled)
+    clusters: dict[tuple, list] = {}
+    for s in settled:
+        clusters.setdefault((s["city"], s["resolution_date"]), []).append(s)
+    cluster_keys = list(clusters.keys())
+    m = len(cluster_keys)
     rois = []
     for _ in range(1000):
-        idx = rng.integers(0, n, n)
-        c = costs[idx].sum()
-        rois.append((pnls[idx].sum() / c) if c > 0 else 0.0)
+        pick = rng.integers(0, m, m)
+        c_tot = 0.0
+        p_tot = 0.0
+        for j in pick:
+            for s in clusters[cluster_keys[j]]:
+                c_tot += s["net_cost_usd"]
+                p_tot += s["pnl_usd"]
+        rois.append((p_tot / c_tot) if c_tot > 0 else 0.0)
     ci_low = float(np.percentile(rois, 5))
 
     return {

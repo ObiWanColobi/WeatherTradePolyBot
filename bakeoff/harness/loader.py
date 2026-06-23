@@ -35,12 +35,15 @@ def time_split(city_days: list[CityDay], holdout_frac: float = 0.34):
 def load_city_days(parquet_dir: str, kind: str = "highest") -> list[CityDay]:
     """Group snapshot rows by (city, resolution_date); attach METAR truth_f.
 
-    Reuses snapshot_replay's parquet reader. NOTE: snapshot_replay.fetch_snapshots
-    filters to highest-kind; for kind='lowest' we read the parquet directly via
-    _fetch_snapshots_parquet and filter on the `kind` column ourselves.
+    Reuses snapshot_replay's parquet reader, which only ever returns highest-kind
+    rows (its SQL hard-codes kind='highest'). Daily-low markets are not supported.
     """
-    import os
-    os.environ["SNAPSHOT_PARQUET_DIR"] = parquet_dir
+    if kind != "highest":
+        raise NotImplementedError(
+            f"load_city_days only supports kind='highest'; the upstream parquet reader "
+            f"(_fetch_snapshots_parquet) hard-codes kind='highest'. Daily-low markets "
+            f"(kind={kind!r}) need a dedicated reader — deferred to a later phase."
+        )
     df = snapshot_replay._fetch_snapshots_parquet(Path(parquet_dir))
     if "kind" in df.columns:
         df = df[df["kind"] == kind]
@@ -58,13 +61,14 @@ def load_city_days(parquet_dir: str, kind: str = "highest") -> list[CityDay]:
 
 
 def _load_truth() -> dict[tuple[str, str], float]:
-    """Per (city, city-local-date) integer-rounded METAR daily max in °F."""
+    """Per (city, city-local-date) METAR daily max in °F (raw float; rounding happens
+    at settlement inside shotgun.bets.winset_resolved)."""
     import duckdb
-    con = duckdb.connect()
-    sys.path.insert(0, str(_RDB))
     import importlib
+    sys.path.insert(0, str(_RDB))
     bt = importlib.import_module("51_snapshot_backtest")
-    tdf = bt.fetch_resolution_truth(con)
+    with duckdb.connect(str(bt.RESEARCH_DB), read_only=True) as con:
+        tdf = bt.fetch_resolution_truth(con)
     return {
         (str(r.city), str(r.resolution_date)): float(r.daily_max_f)
         for r in tdf.itertuples(index=False)
