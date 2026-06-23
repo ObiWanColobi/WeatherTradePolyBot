@@ -12,8 +12,14 @@ def test_bucket_probs_sum_to_one():
     assert all(p >= 0 for p in probs)
 
 def test_fit_emos_inflates_variance_for_underdispersed():
-    # Truth scattered wider than ensemble spread -> d or c must be > 0
+    # Truth scattered far wider than the (tight) ensemble spread. A correct EMOS fit
+    # MUST recover an implied predictive sd approaching the true sd (~3.0), NOT stay at
+    # the underdispersed starting point. We assert the implied sd is materially inflated
+    # — this is the exact property whose absence killed the prior strategy. (A trivial
+    # `c > 0.0` assertion is NOT sufficient: c starts at 1.0, so it would pass even if
+    # the optimizer never inflated.)
     import random
+    import numpy as np
     random.seed(1)
     records = []
     for _ in range(200):
@@ -22,5 +28,7 @@ def test_fit_emos_inflates_variance_for_underdispersed():
         truth = center + random.gauss(0, 3.0)  # actually wide
         records.append({"member_temps": members, "truth_f": truth})
     a, b, c, d = fit_emos(records)
-    # Variance model must add dispersion beyond the tiny ensemble spread
-    assert c > 0.0 or d > 1.0
+    mean_svar = float(np.mean([np.var(r["member_temps"]) for r in records]))
+    implied_sd = (c + d * mean_svar) ** 0.5
+    # Truth sd is 3.0; a non-inflating fit gives ~1.1. Require real inflation.
+    assert implied_sd > 2.0

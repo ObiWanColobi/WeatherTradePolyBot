@@ -24,9 +24,18 @@ def fit_emos(records: list[dict]):
         sigma = np.sqrt(sigma2)
         return np.mean(_gaussian_crps(mu, sigma, y))
 
-    x0 = np.array([0.0, 1.0, np.log(1.0), np.log(1.0)])
+    # Warm-start from a method-of-moments estimate so the optimizer begins NEAR the
+    # inflating optimum rather than at an underdispersed point where Nelder-Mead stalls
+    # on the locally-flat objective. b0=1 (ensemble mean ~unbiased); a0 = mean residual;
+    # the residual variance (truth vs ensemble mean) seeds c, which is the dispersion the
+    # raw ensemble lacks.
+    resid = y - xbar
+    a0 = float(np.mean(resid))
+    resid_var = float(np.var(resid))
+    log_c0 = np.log(max(resid_var, 1e-3))
+    x0 = np.array([a0, 1.0, log_c0, np.log(1.0)])
     res = minimize(obj, x0, method="Nelder-Mead",
-                   options={"maxiter": 5000, "xatol": 1e-4, "fatol": 1e-4})
+                   options={"maxiter": 50000, "xatol": 1e-7, "fatol": 1e-7})
     a, b, log_c, log_d = res.x
     return (float(a), float(b), float(np.exp(log_c)), float(np.exp(log_d)))
 
