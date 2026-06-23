@@ -25,16 +25,35 @@ def load_ensemble_members(cities: list[str]) -> pd.DataFrame:
         return snapshot_replay._agg_gefs_member_dailymax(con, canon)
 
 
+def _to_naive_utc(ts):
+    """Coerce a timestamp-like value to a tz-naive UTC pandas Timestamp (NaT-safe)."""
+    t = pd.Timestamp(ts)
+    if t.tzinfo is not None:
+        t = t.tz_convert("UTC").tz_localize(None)
+    return t
+
+
 def members_asof(gefs_df: pd.DataFrame, canon_city_name: str,
                  resolution_date: str, decision_ts: str) -> list[float]:
-    """Latest init at-or-before decision_ts for this city-day; its member temps (°F)."""
-    sub = gefs_df[
+    """Latest init at-or-before decision_ts for this city-day; its member temps (°F).
+
+    Compares dates/timestamps as REAL temporal values, not strings. A lexical string
+    compare ('2026-03-31 06:00:00' <= '2026-03-31T03:00:00Z' is True because ' ' < 'T')
+    would silently admit a future init = lookahead, the cardinal backtest sin. This
+    mirrors the production selection in snapshot_replay.py (coerce + normalize TZ).
+    """
+    init_norm = gefs_df["init_ts"].map(_to_naive_utc)
+    local_date_d = pd.to_datetime(gefs_df["local_date"]).dt.normalize()
+    res_d = pd.Timestamp(resolution_date).normalize()
+    dec = _to_naive_utc(decision_ts)
+    mask = (
         (gefs_df["city"] == canon_city_name)
-        & (gefs_df["local_date"].astype(str) == str(resolution_date))
-        & (gefs_df["init_ts"].astype(str) <= str(decision_ts))
-    ]
+        & (local_date_d == res_d)
+        & (init_norm <= dec)
+    )
+    sub = gefs_df[mask]
     if sub.empty:
         return []
-    best_init = sub["init_ts"].max()
-    members = sub[sub["init_ts"] == best_init]
+    best_init = init_norm[mask].max()
+    members = sub[init_norm[mask] == best_init]
     return members["daily_max_f"].dropna().tolist()
