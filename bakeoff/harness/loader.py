@@ -50,12 +50,13 @@ def load_city_days(parquet_dir: str, kind: str = "highest") -> list[CityDay]:
     truth = _load_truth()  # {(city, date): daily_max_f}
     out: list[CityDay] = []
     for (city, res_date), grp in df.groupby(["city", "resolution_date"]):
+        res_date_key = str(res_date)[:10]  # canonical bare date, matches _load_truth keys
         out.append(CityDay(
             city=str(city),
-            resolution_date=str(res_date),
+            resolution_date=res_date_key,
             kind=kind,
             snapshots=grp.reset_index(drop=True),
-            truth_f=truth.get((str(city), str(res_date))),
+            truth_f=truth.get((str(city), res_date_key)),
         ))
     return out
 
@@ -69,7 +70,11 @@ def _load_truth() -> dict[tuple[str, str], float]:
     bt = importlib.import_module("51_snapshot_backtest")
     with duckdb.connect(str(bt.RESEARCH_DB), read_only=True) as con:
         tdf = bt.fetch_resolution_truth(con)
+    # Normalize the date key to bare 'YYYY-MM-DD'. The truth query returns a timestamp
+    # ('2026-01-28 00:00:00') but the snapshot loader's resolution_date is a bare date;
+    # without this they never join and every trade would settle "unresolved" (silently
+    # zeroing P&L). Canonicalize to the first 10 chars on both sides of the join.
     return {
-        (str(r.city), str(r.resolution_date)): float(r.daily_max_f)
+        (str(r.city), str(r.resolution_date)[:10]): float(r.daily_max_f)
         for r in tdf.itertuples(index=False)
     }
