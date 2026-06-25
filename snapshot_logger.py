@@ -22,13 +22,27 @@ from snapshot_parse import (
 )
 
 GAMMA_API = "https://gamma-api.polymarket.com"
+CLOB_API = "https://clob.polymarket.com"
 POLL_INTERVAL_SEC = 300  # 5 minutes
 REQUEST_TIMEOUT_SEC = 15
+BOOK_TIMEOUT_SEC = 8     # per-token CLOB /book call; short so a slow book can't stall the poll
 MAX_CONSECUTIVE_FAILURES = 6  # 6 * 5min = 30min of dead polls before re-raise
 
 _PAGE_SIZE = 100
 _MAX_OFFSET = 2000
-_ORDERBOOK_DEPTH = 3
+_ORDERBOOK_DEPTH = 10    # real ladder depth (was 3, but the source field was always NULL)
+
+# --- Targeted depth capture (option B) -------------------------------------
+# Real orderbook depth is NOT in the Gamma payload; it must be fetched per-token
+# from the CLOB /book endpoint. That is ~1 extra HTTP call per market, so we only
+# do it for markets that (a) resolve soon (within the fire window the strategies
+# act in) AND (b) carry enough liquidity to be tradeable — capped per event so a
+# poll can't explode into hundreds of book calls. Everything else keeps NULL depth
+# exactly as before, so the baseline top-of-book snapshot is never at risk.
+DEPTH_CAPTURE_ENABLED = True
+DEPTH_MAX_HOURS_TO_RESOLVE = 24     # only book markets resolving within 24h
+DEPTH_MIN_LIQUIDITY_NUM = 50.0      # skip near-dead books
+DEPTH_MAX_BOOKS_PER_EVENT = 12      # hard cap on book calls per event per poll
 
 _session = requests.Session()
 _session.headers.update({"User-Agent": "weather-bot-snapshot/1.0"})
@@ -77,9 +91,87 @@ def _to_float(v) -> float | None:
         return None
 
 
+def _first_clob_token_id(m: dict) -> str | None:
+    """The YES-side CLOB token id for a market, or None. Gamma serializes
+    clobTokenIds as a JSON string list; the first id is the YES outcome."""
+    raw = m.get("clobTokenIds")
+    if not raw:
+        return None
+    try:
+        toks = json.loads(raw) if isinstance(raw, str) else raw
+        return str(toks[0]) if toks else None
+    except (json.JSONDecodeError, IndexError, TypeError):
+        return None
+
+
+def fetch_book_depth(token_id: str) -> tuple[str | None, str | None]:
+    """Fetch the real bid/ask ladder for one CLOB token.
+
+    Returns (bids_json, asks_json) as top-`_ORDERBOOK_DEPTH` [price,size] lists,
+    or (None, None) on ANY failure — depth is best-effort and must NEVER break
+    the baseline snapshot. CLOB returns bids best (highest) first and asks best
+    (lowest) first already, but we sort defensively.
+    """
+    try:
+        r = _session.get(
+            f"{CLOB_API}/book",
+            params={"token_id": token_id},
+            timeout=BOOK_TIMEOUT_SEC,
+        )
+        r.raise_for_status()
+        b = r.json()
+    except (requests.RequestException, ValueError):
+        return None, None
+
+    def _levels(side, *, descending):
+        raw = b.get(side) or []
+        out = []
+        for lvl in raw:
+            p = _to_float(lvl.get("price"))
+            s = _to_float(lvl.get("size"))
+            if p is not None and s is not None:
+                out.append([p, s])
+        out.sort(key=lambda x: x[0], reverse=descending)
+        return out[:_ORDERBOOK_DEPTH]
+
+    bids = _levels("bids", descending=True)    # highest bid first
+    asks = _levels("asks", descending=False)   # lowest ask first
+    return (json.dumps(bids) if bids else None,
+            json.dumps(asks) if asks else None)
+
+
+def _hours_to_resolution(event_end_iso: str, now_utc: datetime) -> float | None:
+    """Hours from now until the event's end (resolution). None if unparseable."""
+    if not event_end_iso:
+        return None
+    try:
+        end = datetime.fromisoformat(event_end_iso.replace("Z", "+00:00"))
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        return (end - now_utc).total_seconds() / 3600.0
+    except (ValueError, TypeError):
+        return None
+
+
+def _should_capture_depth(m: dict, hours_to_res: float | None) -> bool:
+    """Option-B gate: only book markets resolving soon AND liquid enough."""
+    if not DEPTH_CAPTURE_ENABLED:
+        return False
+    if hours_to_res is None or hours_to_res < 0 or hours_to_res > DEPTH_MAX_HOURS_TO_RESOLVE:
+        return False
+    liq = _to_float(m.get("liquidityNum"))
+    if liq is None or liq < DEPTH_MIN_LIQUIDITY_NUM:
+        return False
+    return True
+
+
 def process_event_dict(event: dict, snapshot_at_utc: str) -> Iterator[dict]:
     """Yield one row dict per sub-market in this event.
     Skips non-daily-temp events and unparseable sub-markets.
+
+    For markets that resolve soon and are liquid (option-B gate), fetches the
+    REAL orderbook ladder from CLOB /book — capped at DEPTH_MAX_BOOKS_PER_EVENT
+    book calls per event. All other markets keep NULL depth, unchanged.
     """
     parsed_slug = parse_event_slug(event.get("slug", ""))
     if parsed_slug is None:
@@ -88,6 +180,10 @@ def process_event_dict(event: dict, snapshot_at_utc: str) -> Iterator[dict]:
     event_slug = event["slug"]
     event_end_iso = event.get("endDate") or ""
     condition_id = event.get("conditionId")
+
+    now_utc = datetime.now(timezone.utc)
+    hours_to_res = _hours_to_resolution(event_end_iso, now_utc)
+    books_fetched = 0
 
     for m in event.get("markets") or []:
         gtitle = m.get("groupItemTitle", "")
@@ -100,8 +196,15 @@ def process_event_dict(event: dict, snapshot_at_utc: str) -> Iterator[dict]:
         ltp = _to_float(m.get("lastTradePrice"))
         mid = (bb + ba) / 2 if (bb is not None and ba is not None and bb > 0 and ba > 0) else None
 
-        ob_bids = m.get("orderBook", {}).get("bids") if isinstance(m.get("orderBook"), dict) else None
-        ob_asks = m.get("orderBook", {}).get("asks") if isinstance(m.get("orderBook"), dict) else None
+        # Real depth only for qualifying markets, under the per-event cap.
+        ob_bids_json = None
+        ob_asks_json = None
+        if (books_fetched < DEPTH_MAX_BOOKS_PER_EVENT
+                and _should_capture_depth(m, hours_to_res)):
+            token_id = _first_clob_token_id(m)
+            if token_id:
+                ob_bids_json, ob_asks_json = fetch_book_depth(token_id)
+                books_fetched += 1
 
         yield {
             "snapshot_at_utc":         snapshot_at_utc,
@@ -122,8 +225,8 @@ def process_event_dict(event: dict, snapshot_at_utc: str) -> Iterator[dict]:
             "best_ask":                ba,
             "mid_price":               mid,
             "last_trade_price":        ltp,
-            "orderbook_bids_json":     json.dumps(ob_bids[:_ORDERBOOK_DEPTH]) if ob_bids else None,
-            "orderbook_asks_json":     json.dumps(ob_asks[:_ORDERBOOK_DEPTH]) if ob_asks else None,
+            "orderbook_bids_json":     ob_bids_json,
+            "orderbook_asks_json":     ob_asks_json,
             "volume_24h":              _to_float(m.get("volume24hr")),
             "liquidity_num":           _to_float(m.get("liquidityNum")),
             "raw_market_json":         json.dumps(m, default=str),

@@ -5,7 +5,14 @@ import requests
 
 import config
 import db
-from snapshot_logger import fetch_active_weather_events, process_event_dict, run_one_poll
+from datetime import datetime, timedelta, timezone
+
+import snapshot_logger
+from snapshot_logger import (
+    fetch_active_weather_events, process_event_dict, run_one_poll,
+    fetch_book_depth, _should_capture_depth, _hours_to_resolution,
+    _first_clob_token_id,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -123,3 +130,91 @@ def test_fetch_active_weather_events_raises_on_http_error():
     with patch("snapshot_logger._session.get", return_value=mock_response):
         with pytest.raises(requests.HTTPError):
             fetch_active_weather_events()
+
+
+# --- depth capture (option B) ------------------------------------------------
+
+def test_first_clob_token_id_parses_json_list():
+    assert _first_clob_token_id({"clobTokenIds": '["tokA", "tokB"]'}) == "tokA"
+    assert _first_clob_token_id({"clobTokenIds": ["tokA", "tokB"]}) == "tokA"
+    assert _first_clob_token_id({}) is None
+    assert _first_clob_token_id({"clobTokenIds": ""}) is None
+
+
+def test_hours_to_resolution_parses_iso_z():
+    now = datetime(2026, 6, 24, 0, 0, tzinfo=timezone.utc)
+    h = _hours_to_resolution("2026-06-24T12:00:00Z", now)
+    assert abs(h - 12.0) < 0.01
+    assert _hours_to_resolution("", now) is None
+
+
+def test_should_capture_depth_gate():
+    # qualifies: resolves in 6h, liquid
+    assert _should_capture_depth({"liquidityNum": "500"}, 6.0) is True
+    # too far out
+    assert _should_capture_depth({"liquidityNum": "500"}, 100.0) is False
+    # already resolved (negative)
+    assert _should_capture_depth({"liquidityNum": "500"}, -3.0) is False
+    # too illiquid
+    assert _should_capture_depth({"liquidityNum": "5"}, 6.0) is False
+    # missing hours
+    assert _should_capture_depth({"liquidityNum": "500"}, None) is False
+
+
+def test_fetch_book_depth_parses_and_sorts_ladder():
+    mock_response = MagicMock()
+    mock_response.json.return_value = {
+        "bids": [{"price": "0.30", "size": "100"}, {"price": "0.31", "size": "50"}],
+        "asks": [{"price": "0.35", "size": "200"}, {"price": "0.34", "size": "75"}],
+    }
+    mock_response.raise_for_status.return_value = None
+    with patch("snapshot_logger._session.get", return_value=mock_response):
+        bids_json, asks_json = fetch_book_depth("tok123")
+    import json as _json
+    bids = _json.loads(bids_json)
+    asks = _json.loads(asks_json)
+    assert bids[0] == [0.31, 50.0]   # highest bid first
+    assert asks[0] == [0.34, 75.0]   # lowest ask first
+
+
+def test_fetch_book_depth_is_failsafe_on_error():
+    """A book-fetch failure must return (None, None), never raise — the baseline
+    snapshot must survive even if CLOB is down."""
+    with patch("snapshot_logger._session.get", side_effect=requests.RequestException("boom")):
+        assert fetch_book_depth("tok123") == (None, None)
+
+
+def test_depth_captured_for_near_resolution_liquid_market():
+    """A market resolving soon + liquid gets a real ladder; far/illiquid stays NULL."""
+    # Slug must parse; the depth gate keys off endDate (set ~6h out), not the
+    # slug's date, so a parseable slug + near-future endDate triggers a book call.
+    soon = (datetime.now(timezone.utc) + timedelta(hours=6)).isoformat()
+    event = {
+        "slug": "highest-temperature-in-nyc-on-may-20-2026",
+        "endDate": soon,
+        "conditionId": "0xevent",
+        "markets": [{
+            "id": "m1", "conditionId": "0xm1", "groupItemTitle": "64-65°F",
+            "bestBid": "0.30", "bestAsk": "0.35", "lastTradePrice": "0.32",
+            "volume24hr": "500", "liquidityNum": "1000",
+            "clobTokenIds": '["tokYES", "tokNO"]',
+        }],
+    }
+    mock_response = MagicMock()
+    mock_response.raise_for_status.return_value = None
+    mock_response.json.return_value = {
+        "bids": [{"price": "0.30", "size": "100"}],
+        "asks": [{"price": "0.35", "size": "200"}],
+    }
+    with patch("snapshot_logger._session.get", return_value=mock_response):
+        rows = list(process_event_dict(event, snapshot_at_utc="2026-06-24T00:00:00Z"))
+    assert len(rows) == 1
+    assert rows[0]["orderbook_bids_json"] is not None
+    assert rows[0]["orderbook_asks_json"] is not None
+
+
+def test_no_depth_for_far_future_market():
+    """The existing far-dated SAMPLE_EVENT must NOT trigger a book call (depth stays NULL)."""
+    rows = list(process_event_dict(SAMPLE_EVENT, snapshot_at_utc="2026-05-19T20:00:00Z"))
+    assert all(r["orderbook_bids_json"] is None for r in rows)
+    assert all(r["orderbook_asks_json"] is None for r in rows)
