@@ -39,6 +39,17 @@ _scratch/
 # ── Script run artifacts (CSV outputs, local-only) ───────────────────────────
 scripts/_out_*
 
+# ── Bake-off scratch measurement scripts (local-only; _-prefix = throwaway) ───
+bakeoff/_*.py
+
+# ── MCP tool scratch (firecrawl dumps, playwright console/page logs) ──────────
+.firecrawl/
+.playwright-mcp/
+
+# ── Local VPS diagnostic dumps ───────────────────────────────────────────────
+weatherbot_vps_checkup.log
+*_vps_checkup.log
+
 # ── Snapshot rollup parquet exports (local-only; rsynced off-VPS) ────────────
 snapshot_parquet/
 

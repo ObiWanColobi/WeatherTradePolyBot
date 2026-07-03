@@ -2,7 +2,8 @@
 from __future__ import annotations
 import pandas as pd
 
-_FIELDS = ("bound_lo_f", "bound_hi_f", "is_open_tail", "best_ask", "best_bid", "group_item_title")
+_FIELDS = ("bound_lo_f", "bound_hi_f", "is_open_tail", "best_ask", "best_bid",
+           "group_item_title", "orderbook_bids_json", "orderbook_asks_json")
 
 
 def decision_rows(snapshots: pd.DataFrame, hours_before_close: int = 12):
